@@ -36,7 +36,11 @@ import sys
 import torch
 import torch.distributed as dist
 
-from nemo_automodel.components.models.common.mtp import shift_packed_tensor
+from nemo_automodel.components.models.common.mtp import prepare_mtp_context_parallel_inputs, shift_packed_tensor
+
+
+def _prepare_mtp_inputs(model, batch):
+    return prepare_mtp_context_parallel_inputs(batch, num_depths=model.mtp_config.num_layers)
 
 
 def dual_chunk_swap_unsplit(chunks_per_rank, cp_size, seq_dim=1):
@@ -651,13 +655,14 @@ def run_thd_te_mtp(rank, world_size, device, config):
     # document ignored.
     seq_idx_batched = seq_idx.unsqueeze(0)
     labels_full = shift_packed_tensor(input_ids, depth=1, seq_idx=seq_idx_batched, fill_value=-100).squeeze(0)
-    mtp_inputs_full = model_baseline.prepare_mtp_inputs_for_cp(
+    mtp_inputs_full = _prepare_mtp_inputs(
+        model_baseline,
         {
             "input_ids": input_ids,
             "labels": labels_full.unsqueeze(0),
             "position_ids": position_ids.unsqueeze(0),
             "seq_idx": seq_idx.unsqueeze(0),
-        }
+        },
     )
     assert mtp_inputs_full is not None
     mtp_input_ids_full = mtp_inputs_full.input_ids[0]
@@ -726,13 +731,14 @@ def run_thd_te_mtp(rank, world_size, device, config):
         raise AssertionError(
             f"TE packed CP assigned {token_counts[0]} tokens per rank; expected {total_len // world_size}"
         )
-    mtp_inputs_cp = model_cp.prepare_mtp_inputs_for_cp(
+    mtp_inputs_cp = _prepare_mtp_inputs(
+        model_cp,
         {
             "input_ids": input_ids,
             "labels": labels_full.unsqueeze(0),
             "position_ids": position_ids.unsqueeze(0),
             "seq_idx": seq_idx.unsqueeze(0),
-        }
+        },
     )
     assert mtp_inputs_cp is not None
     assert mtp_inputs_cp.position_ids is not None
@@ -935,7 +941,7 @@ def run_bshd_sdpa_mtp(rank, world_size, device, config):
         "seq_lens": torch.tensor([[seq_len_a, seq_len_b]], device=device),
         "seq_lens_padded": torch.tensor([[seq_len_a, seq_len_b]], device=device),
     }
-    mtp_inputs_full = model_baseline.prepare_mtp_inputs_for_cp(raw_packed_batch)
+    mtp_inputs_full = _prepare_mtp_inputs(model_baseline, raw_packed_batch)
     assert mtp_inputs_full is not None
     assert mtp_inputs_full.position_ids is not None
     mtp_input_ids_full = mtp_inputs_full.input_ids[0]
@@ -983,14 +989,15 @@ def run_bshd_sdpa_mtp(rank, world_size, device, config):
     _wire_sdpa_cp(model_cp.mtp, cp_group)
     set_rotate_method("allgather")
 
-    mtp_inputs_cp = model_cp.prepare_mtp_inputs_for_cp(
+    mtp_inputs_cp = _prepare_mtp_inputs(
+        model_cp,
         {
             "input_ids": input_ids,
             "labels": labels_full,
             "position_ids": position_ids,
             "seq_lens": raw_packed_batch["seq_lens"],
             "seq_lens_padded": raw_packed_batch["seq_lens_padded"],
-        }
+        },
     )
     assert mtp_inputs_cp is not None
     assert mtp_inputs_cp.position_ids is not None

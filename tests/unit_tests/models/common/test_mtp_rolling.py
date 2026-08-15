@@ -258,6 +258,20 @@ def test_precomputed_position_ids_skip_rank_local_rolling():
         torch.testing.assert_close(mtp.layers[depth].calls[0]["position_ids"], position_ids_per_depth[depth])
 
 
+def test_precomputed_multi_axis_position_ids_match_batched_token_layout():
+    mtp = _build_module(num_depths=1, pattern_length=1)
+    embeddings = (torch.zeros(1, 4, 3),)
+    positions = (torch.arange(12).reshape(3, 1, 4),)
+
+    mtp(
+        torch.zeros(1, 4, 3),
+        embed_inputs=embeddings,
+        position_ids_per_depth=positions,
+    )
+
+    torch.testing.assert_close(mtp.layers[0].calls[0]["position_ids"], positions[0])
+
+
 def test_precomputed_position_ids_reject_rank_local_token_rolling():
     mtp = _build_module(num_depths=2, pattern_length=1)
 
@@ -334,6 +348,32 @@ def test_shift_packed_tensor_supports_trailing_feature_dimensions():
     assert shifted[:, -1].tolist() == [[-1, -1, -1, -1]]
 
 
+def test_shift_packed_tensor_supports_multi_axis_position_ids():
+    values = torch.tensor(
+        [
+            [[0, 1, 2, 0, 1, 2]],
+            [[10, 11, 12, 10, 11, 12]],
+            [[20, 21, 22, 20, 21, 22]],
+        ]
+    )
+    seq_idx = torch.tensor([[1, 1, 1, 2, 2, 2]])
+
+    shifted = shift_packed_tensor(
+        values,
+        depth=1,
+        seq_idx=seq_idx,
+        batch_dim=1,
+        seq_dim=2,
+        fill_value=-1,
+    )
+
+    assert shifted[:, 0].tolist() == [
+        [1, 2, -1, 1, 2, -1],
+        [11, 12, -1, 11, 12, -1],
+        [21, 22, -1, 21, 22, -1],
+    ]
+
+
 class TestMTPContextParallelPreparation:
     @staticmethod
     def _prepare(batch, *, num_depths=2):
@@ -364,6 +404,33 @@ class TestMTPContextParallelPreparation:
         assert [tensor.tolist() for tensor in prepared.targets] == [
             [[12, -100, -100, 22, -100, -100]],
             [[-100, -100, -100, -100, -100, -100]],
+        ]
+        assert [tensor.tolist() for tensor in prepared.valid_masks] == [
+            [[True, True, False, True, True, False]],
+            [[True, False, False, True, False, False]],
+        ]
+
+    def test_prepares_multi_axis_positions_in_global_packed_order(self):
+        batch = {
+            "input_ids": torch.tensor([[10, 11, 12, 20, 21, 22]]),
+            "labels": torch.tensor([[11, 12, -100, 21, 22, -100]]),
+            "position_ids": torch.tensor(
+                [
+                    [[0, 1, 2, 0, 1, 2]],
+                    [[10, 11, 12, 10, 11, 12]],
+                    [[20, 21, 22, 20, 21, 22]],
+                ]
+            ),
+            "_packed_seq_ids": torch.tensor([[1, 1, 1, 2, 2, 2]]),
+        }
+
+        prepared = self._prepare(batch, num_depths=1)
+
+        assert prepared.position_ids_seq_dim == 2
+        assert prepared.position_ids[0][:, 0].tolist() == [
+            [1, 2, 0, 1, 2, 0],
+            [11, 12, 0, 11, 12, 0],
+            [21, 22, 0, 21, 22, 0],
         ]
 
     def test_raw_thd_lengths_mask_boundaries_before_sharding(self):

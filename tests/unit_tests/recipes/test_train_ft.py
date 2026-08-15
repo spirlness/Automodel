@@ -2590,7 +2590,6 @@ def test_forward_backward_step_shards_global_mtp_inputs_and_targets(monkeypatch)
     """The recipe consumes raw packed lengths, shifts globally, then reuses the CP layout."""
     from nemo_automodel.components.models.common.mtp import (
         MTPConfig,
-        prepare_mtp_context_parallel_inputs,
     )
 
     captured = {}
@@ -2601,16 +2600,8 @@ def test_forward_backward_step_shards_global_mtp_inputs_and_targets(monkeypatch)
             super().__init__()
             self.scale = nn.Parameter(torch.tensor(1.0))
             self.mtp_config = MTPConfig(num_layers=1, layer_pattern="*")
-            self.prepared_before_shard = False
+            self.sharder_resolved = False
             self.supports = SimpleNamespace(mtp_enabled=True, supports_mtp_cp=True)
-
-        def prepare_mtp_inputs_for_cp(self, batch, *, ignore_index=-100):
-            self.prepared_before_shard = True
-            return prepare_mtp_context_parallel_inputs(
-                batch,
-                num_depths=self.mtp_config.num_layers,
-                ignore_index=ignore_index,
-            )
 
         def forward(
             self,
@@ -2637,12 +2628,13 @@ def test_forward_backward_step_shards_global_mtp_inputs_and_targets(monkeypatch)
         def __init__(self, resolved_model, device_mesh, batch, **kwargs):
             del device_mesh, kwargs
             assert resolved_model is model
-            assert model.prepared_before_shard
+            assert not model.sharder_resolved
+            model.sharder_resolved = True
             assert batch["input_ids"].shape == (1, 6)
             assert batch["seq_lens_padded"].tolist() == [[3, 3, -1000]]
 
         def shard(self, batch):
-            assert model.prepared_before_shard
+            assert model.sharder_resolved
             local_batch = dict(batch)
             for key in ("input_ids", "labels", "position_ids"):
                 local_batch[key] = local_batch[key].index_select(1, local_indices)
@@ -2706,7 +2698,7 @@ def test_forward_backward_step_shards_global_mtp_inputs_and_targets(monkeypatch)
             num_batches=1,
             is_train=True,
         )
-    assert not model.prepared_before_shard
+    assert not model.sharder_resolved
     assert loss_buffer == []
     model.supports.supports_mtp_cp = True
 

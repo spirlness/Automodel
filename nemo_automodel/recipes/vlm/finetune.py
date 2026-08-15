@@ -69,6 +69,7 @@ from nemo_automodel.components.loss.linear_ce import FusedLinearCrossEntropy
 from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy
 from nemo_automodel.components.loss.mtp import calculate_mtp_loss
 from nemo_automodel.components.loss.utils import _get_lm_head_weight, calculate_loss
+from nemo_automodel.components.models.common.mtp import prepare_mtp_context_parallel_inputs
 from nemo_automodel.components.quantization.fp8 import build_fp8_config
 from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 from nemo_automodel.components.training.rng import ScopedRNG, StatefulRNG
@@ -882,7 +883,43 @@ class FinetuneRecipeForVLM(BaseRecipe):
             padding_token_id=_padding_id,
             invoke_pre_embed=True,
         )
+        model = self.model_parts[0]
+        supports = getattr(model, "supports", None)
+        mtp_enabled = bool(
+            getattr(supports, "mtp_enabled", getattr(getattr(model, "mtp_config", None), "enabled", False))
+        )
+        mtp_cp_inputs = None
+        if _cp_active and not self.pp_enabled and mtp_enabled:
+            if not bool(getattr(supports, "supports_mtp_cp", False)):
+                raise NotImplementedError(
+                    f"{type(model).__name__} declares supports_mtp_cp=False; "
+                    "MTP target preparation for context parallelism is unavailable"
+                )
+            num_depths = int(getattr(getattr(model, "mtp_config", None), "num_layers", 0) or 0)
+            if num_depths <= 0:
+                raise ValueError("MTP is enabled but model.mtp_config.num_layers is not positive")
+            mtp_cp_inputs = prepare_mtp_context_parallel_inputs(
+                batch,
+                num_depths=num_depths,
+                ignore_index=self.cfg.mtp.ignore_index,
+            )
         train_ctx, batch = cp_sharder.shard(batch)
+        mtp_per_depth_targets = None
+        if mtp_cp_inputs is not None:
+            batch["mtp_per_depth_input_ids"] = tuple(
+                cp_sharder.shard_token_tensor(ids, seq_dim=1, fill=0) for ids in mtp_cp_inputs.input_ids
+            )
+            batch["mtp_per_depth_position_ids"] = tuple(
+                cp_sharder.shard_token_tensor(ids, seq_dim=mtp_cp_inputs.position_ids_seq_dim, fill=0)
+                for ids in mtp_cp_inputs.position_ids
+            )
+            batch["mtp_per_depth_valid_masks"] = tuple(
+                cp_sharder.shard_token_tensor(mask, seq_dim=1, fill=False) for mask in mtp_cp_inputs.valid_masks
+            )
+            mtp_per_depth_targets = tuple(
+                cp_sharder.shard_token_tensor(targets, seq_dim=1, fill=self.cfg.mtp.ignore_index)
+                for targets in mtp_cp_inputs.targets
+            )
         labels = batch.pop("labels")
 
         if self.pp_enabled:
@@ -960,6 +997,8 @@ class FinetuneRecipeForVLM(BaseRecipe):
                 mtp_per_depth_h = getattr(out, "mtp_per_depth_h", None)
                 mtp_per_depth_logits = getattr(out, "mtp_per_depth_logits", None)
                 if mtp_per_depth_h is not None or mtp_per_depth_logits is not None:
+                    if _cp_active and mtp_per_depth_targets is None:
+                        raise RuntimeError("MTP with context parallelism requires globally prepared per-depth targets")
                     mtp_cfg = self.cfg.mtp
                     scaling_factor = (
                         mtp_cfg.scaling_factor if mtp_cfg.scaling_factor is not None else out.mtp_loss_scaling_factor
@@ -968,6 +1007,7 @@ class FinetuneRecipeForVLM(BaseRecipe):
                         self.loss_fn,
                         mtp_per_depth_h=mtp_per_depth_h,
                         mtp_per_depth_logits=mtp_per_depth_logits,
+                        mtp_per_depth_targets=mtp_per_depth_targets,
                         labels=labels,
                         model=model,
                         scaling_factor=scaling_factor,
@@ -975,6 +1015,7 @@ class FinetuneRecipeForVLM(BaseRecipe):
                         ignore_index=mtp_cfg.ignore_index,
                         lm_weight=shared_lm_weight,
                         grad_reduce_group=grad_reduce_group,
+                        cu_seqlens=None if mtp_per_depth_targets is not None else batch.get("cu_seqlens"),
                     )
 
                 # Joint base + drafter co-training (Gemma4WithDrafter and

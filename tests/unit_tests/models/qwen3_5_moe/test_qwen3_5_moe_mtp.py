@@ -73,6 +73,9 @@ def _backend():
 
 
 class TestQwen3_5MoeMTP:
+    def test_declares_mtp_cp_support(self):
+        assert Qwen3_5MoeForConditionalGeneration.ModelCapabilities().supports_mtp_cp is True
+
     def test_moe_mtp_builds_full_attention_moe_block(self):
         model = Qwen3_5MoeForConditionalGeneration(_tiny_vl_config(mtp_num_hidden_layers=1), backend=_backend())
 
@@ -119,3 +122,70 @@ class TestQwen3_5MoeMTP:
         assert out.mtp_per_depth_h is not None
         assert len(out.mtp_per_depth_h) == 1
         assert out.mtp_per_depth_h[0].shape == (1, 4, cfg.text_config.hidden_size)
+
+    @pytest.mark.parametrize(
+        ("uses_blockdiag_cp", "expected_main", "expected_mtp", "valid_mask"),
+        [
+            (False, [0, 1, 6, 7], [1, 500, 7, 0], [True, True, True, False]),
+            (True, [0, 1, 500, 3], [1, 500, 3, 4], [True, True, True, True]),
+        ],
+    )
+    def test_cp_mtp_uses_globally_rolled_fused_embeddings(
+        self,
+        monkeypatch,
+        uses_blockdiag_cp,
+        expected_main,
+        expected_mtp,
+        valid_mask,
+    ):
+        cfg = _tiny_vl_config(mtp_num_hidden_layers=1)
+        model = Qwen3_5MoeForConditionalGeneration(cfg, backend=_backend())
+        model.train()
+
+        class _CPMesh:
+            @staticmethod
+            def size():
+                return 2
+
+            @staticmethod
+            def get_local_rank():
+                return 0
+
+        model.cp_mesh = _CPMesh()
+        hidden_size = cfg.text_config.hidden_size
+        full_fused = torch.arange(8, dtype=model.lm_head.weight.dtype).view(1, 8, 1).expand(1, 8, hidden_size)
+        full_fused = full_fused.clone()
+        full_fused[:, 2] = 500  # stand in for a vision-spliced embedding
+        captured = {}
+
+        monkeypatch.setattr(model, "_embed_and_splice_for_cp", lambda input_ids, **kwargs: full_fused)
+        monkeypatch.setattr(
+            "nemo_automodel.components.distributed.blockdiag_cp.current_blockdiag_cp_state",
+            lambda: object() if uses_blockdiag_cp else None,
+        )
+
+        def fake_model_forward(**kwargs):
+            captured["main_embed_inputs"] = kwargs["inputs_embeds"].detach().clone()
+            return SimpleNamespace(last_hidden_state=torch.zeros_like(kwargs["inputs_embeds"]))
+
+        def fake_mtp_forward(hidden_states, **kwargs):
+            captured["mtp_embed_inputs"] = tuple(t.detach().clone() for t in kwargs["embed_inputs"])
+            captured["mtp_position_ids"] = tuple(t.detach().clone() for t in kwargs["position_ids_per_depth"])
+            return [hidden_states]
+
+        monkeypatch.setattr(model.model, "forward", fake_model_forward)
+        monkeypatch.setattr(model.mtp, "forward", fake_mtp_forward)
+
+        local_positions = torch.arange(12).reshape(3, 1, 4)
+        out = model(
+            input_ids=torch.tensor([[10, 11, 12, 13, 14, 15, 16, 17]]),
+            position_ids=local_positions,
+            mtp_per_depth_input_ids=(torch.tensor([[11, 12, 17, 0]]),),
+            mtp_per_depth_position_ids=(local_positions + 1,),
+            mtp_per_depth_valid_masks=(torch.tensor([valid_mask]),),
+        )
+
+        assert out.mtp_per_depth_h is not None
+        assert captured["main_embed_inputs"][0, :, 0].tolist() == expected_main
+        assert captured["mtp_embed_inputs"][0][0, :, 0].tolist() == expected_mtp
+        torch.testing.assert_close(captured["mtp_position_ids"][0], local_positions + 1)

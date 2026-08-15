@@ -75,6 +75,7 @@ from nemo_automodel.components.loss.linear_ce import FusedLinearCrossEntropy
 from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy
 from nemo_automodel.components.loss.mtp import calculate_mtp_loss
 from nemo_automodel.components.loss.utils import _get_lm_head_weight, calculate_loss
+from nemo_automodel.components.models.common.mtp import prepare_mtp_context_parallel_inputs
 from nemo_automodel.components.quantization.fp8 import build_fp8_config
 from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 from nemo_automodel.components.training.rng import ScopedRNG, StatefulRNG
@@ -1037,10 +1038,6 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
                     f"{type(model).__name__} declares supports_mtp_cp=False; "
                     "MTP target preparation for context parallelism is unavailable"
                 )
-            mtp_cp_inputs = model.prepare_mtp_inputs_for_cp(
-                batch,
-                ignore_index=self.cfg.mtp.ignore_index,
-            )
         cp_sharder = ContextParallelSharder(
             model,
             self.device_mesh,
@@ -1048,6 +1045,16 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             padding_token_id=self.tokenizer.pad_token_id if self.tokenizer else 0,
             num_chunks=self.pp.pp_batch_size // self.pp.pp_microbatch_size if self.pp_enabled else 1,
         )
+        if not self.pp_enabled and self._get_cp_group_size() > 1 and mtp_enabled:
+            mtp_config = getattr(model, "mtp_config", None)
+            num_depths = int(getattr(mtp_config, "num_layers", 0) or 0)
+            if num_depths <= 0:
+                raise ValueError("MTP is enabled but model.mtp_config.num_layers is not positive")
+            mtp_cp_inputs = prepare_mtp_context_parallel_inputs(
+                batch,
+                num_depths=num_depths,
+                ignore_index=self.cfg.mtp.ignore_index,
+            )
         train_ctx, batch = cp_sharder.shard(batch)
         mtp_per_depth_targets = None
         if mtp_cp_inputs is not None:
@@ -1055,7 +1062,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
                 cp_sharder.shard_token_tensor(ids, seq_dim=1, fill=0) for ids in mtp_cp_inputs.input_ids
             )
             batch["mtp_per_depth_position_ids"] = tuple(
-                cp_sharder.shard_token_tensor(ids, seq_dim=1, fill=0) for ids in mtp_cp_inputs.position_ids
+                cp_sharder.shard_token_tensor(ids, seq_dim=mtp_cp_inputs.position_ids_seq_dim, fill=0)
+                for ids in mtp_cp_inputs.position_ids
             )
             mtp_per_depth_targets = tuple(
                 cp_sharder.shard_token_tensor(targets, seq_dim=1, fill=self.cfg.mtp.ignore_index)

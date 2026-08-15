@@ -29,10 +29,6 @@ from nemo_automodel.components.models.common import (
     initialize_linear_module,
     initialize_rms_norm_module,
 )
-from nemo_automodel.components.models.common.mtp import (
-    MTPContextParallelInputs,
-    prepare_mtp_context_parallel_inputs,
-)
 from nemo_automodel.components.models.common.tie_word_embeddings import (
     TieSupport,
     reject_unsupported_tie_word_embeddings,
@@ -588,41 +584,6 @@ class NemotronHForCausalLM(HFCheckpointingMixin, GenerationMixin, nn.Module, MoE
             cur_input_ids = roll_tensor(cur_input_ids, shifts=-1, dim=-1)
             embeds.append(self.model.embed_tokens(cur_input_ids))
         return tuple(embeds)
-
-    def prepare_mtp_inputs_for_cp(
-        self,
-        batch: dict[str, Any],
-        *,
-        ignore_index: int = -100,
-    ) -> MTPContextParallelInputs | None:
-        """Prepare global MTP futures before context-parallel sharding.
-
-        The recipe calls this hook while ``batch`` is still in global sequence
-        order. It shifts future-token IDs, positions, and loss targets without
-        crossing packed-sequence boundaries. The recipe then shards each tensor
-        with the same :class:`ContextParallelSharder` instance as the main
-        inputs, avoiding both rank-local rolls and an all-gather.
-
-        Args:
-            batch: Unsharded model batch containing ``input_ids`` and ``labels``
-                with shape ``[batch, sequence]``. Missing ``position_ids`` are
-                synthesized in global order. ``seq_idx``, ``_packed_seq_ids``,
-                raw ``seq_lens_padded``, or ``cu_seqlens`` may describe
-                packed-sequence boundaries.
-            ignore_index: Fill value for invalid MTP loss targets.
-
-        Returns:
-            Globally ordered tensors for every enabled MTP depth, or ``None``
-            when MTP is disabled.
-        """
-        if not self.mtp_config.enabled:
-            return None
-
-        return prepare_mtp_context_parallel_inputs(
-            batch,
-            num_depths=self.mtp_config.num_layers,
-            ignore_index=ignore_index,
-        )
 
     def customize_pipeline_stage_modules(
         self,
