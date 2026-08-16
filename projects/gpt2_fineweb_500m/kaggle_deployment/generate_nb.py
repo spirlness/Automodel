@@ -21,8 +21,10 @@ REPOSITORY_URL = "https://github.com/spirlness/Automodel.git"
 BRANCH = "spirlness/feat/gpt2-fineweb-training"
 RECIPE_PATH = "projects/gpt2_fineweb_500m/config/gpt2_fineweb_500m.yaml"
 DATA_DIR = "/kaggle/working/fineweb_1B"
+SMOKE_DATA_DIR = "/kaggle/working/fineweb_smoke"
 CHECKPOINT_DIR = "/kaggle/working/checkpoints"
 MAX_TOKENS = "1B"
+SMOKE_MAX_TOKENS = "1M"
 GLOBAL_BATCH_SIZE = 32
 LOCAL_BATCH_SIZE = 4
 MAX_STEPS = 30517
@@ -71,39 +73,80 @@ if num_gpus != 2 or any("T4" not in name for name in gpu_names):
 !git clone --depth 1 --branch {BRANCH} {REPOSITORY_URL} Automodel
 %cd Automodel
 !uv sync --locked --group dev --extra fa --inexact
+
+# Store the token only in Kaggle Secrets under the name HF_TOKEN. Never print it.
+from kaggle_secrets import UserSecretsClient
+import os
+
+os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
+print("Loaded HF_TOKEN from Kaggle Secrets.")
 """,
             ),
             _code_cell(
-                "preprocess",
-                f"""# Produce the binary dataset with the repository-owned preprocessor.
-!uv run python projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py \\
-  --dataset HuggingFaceFW/fineweb \\
-  --set-name sample-10BT \\
-  --output-dir {DATA_DIR} \\
-  --max-tokens {MAX_TOKENS}
+                "smoke-preprocess",
+                f"""# First verify download, tokenization, and binary writing on a bounded sample.
+!uv run python projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py \
+  --dataset HuggingFaceFW/fineweb \
+  --set-name sample-10BT \
+  --output-dir {SMOKE_DATA_DIR} \
+  --max-tokens {SMOKE_MAX_TOKENS} \
+  --chunk-size 16 \
+  --prefetch 4 \
+  --num-workers 2
 """,
             ),
             _code_cell(
-                "train",
-                f"""# Train 1B tokens on two T4 GPUs. A four-sample micro-batch is the
-# conservative T4 setting after the observed first-backward OOM; global batch 32
-# therefore uses four gradient-accumulation steps. Checkpoint retention is enforced
-# by the project-owned checkpoint lifecycle. T4 supports at most 64 KiB shared
-# memory per block, so use logits-based CE instead of the incompatible fused Triton CE.
-!PYTORCH_ALLOC_CONF=expandable_segments:True uv run automodel {RECIPE_PATH} \\
-  --nproc-per-node 2 \\
-  --dataset.file_pattern={DATA_DIR}_max_tokens_{MAX_TOKENS}/dataset.bin \\
-  --step_scheduler.global_batch_size={GLOBAL_BATCH_SIZE} \\
-  --step_scheduler.local_batch_size={LOCAL_BATCH_SIZE} \\
-  --step_scheduler.max_steps={MAX_STEPS} \\
-  --step_scheduler.ckpt_every_steps={CHECKPOINT_INTERVAL} \\
-  --step_scheduler.save_checkpoint_every_epoch=false \\
-  --checkpoint.checkpoint_dir={CHECKPOINT_DIR} \\
-  --checkpoint.max_recent_checkpoints=3 \\
-  --loss_fn._target_={LOSS_TARGET} \\
-  --model.torch_dtype=float16 \\
-  --distributed.mp_policy.param_dtype=torch.float16 \\
+                "smoke-train",
+                f"""# Exercise two-rank FSDP, FP16, ordinary CE, backward, and optimizer update.
+# T4 supports at most 64 KiB shared memory per block, so use logits-based CE instead
+# of the incompatible fused Triton CE. This runs one full-size global training step.
+!PYTORCH_ALLOC_CONF=expandable_segments:True uv run automodel {RECIPE_PATH} \
+  --nproc-per-node 2 \
+  --dataset.file_pattern={SMOKE_DATA_DIR}_max_tokens_{SMOKE_MAX_TOKENS}/dataset.bin \
+  --step_scheduler.global_batch_size={GLOBAL_BATCH_SIZE} \
+  --step_scheduler.local_batch_size={LOCAL_BATCH_SIZE} \
+  --step_scheduler.max_steps=1 \
+  --step_scheduler.ckpt_every_steps=1 \
+  --step_scheduler.val_every_steps=1000000 \
+  --step_scheduler.save_checkpoint_every_epoch=false \
+  --checkpoint.enabled=false \
+  --loss_fn._target_={LOSS_TARGET} \
+  --model.torch_dtype=float16 \
+  --distributed.mp_policy.param_dtype=torch.float16 \
   --distributed.mp_policy.output_dtype=torch.float16
+""",
+            ),
+            _code_cell(
+                "full-train",
+                f"""# Smoke test passed. Keep this False until its logs confirm both preprocessing
+# and one optimizer update completed successfully. Then set it to True and run this cell.
+RUN_FULL_TRAINING = False
+
+if RUN_FULL_TRAINING:
+    get_ipython().system(
+        "PYTORCH_ALLOC_CONF=expandable_segments:True uv run python "
+        "projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py "
+        "--dataset HuggingFaceFW/fineweb --set-name sample-10BT "
+        "--output-dir {DATA_DIR} --max-tokens {MAX_TOKENS}"
+    )
+    get_ipython().system(
+        "PYTORCH_ALLOC_CONF=expandable_segments:True uv run automodel {RECIPE_PATH} "
+        "--nproc-per-node 2 "
+        "--dataset.file_pattern={DATA_DIR}_max_tokens_{MAX_TOKENS}/dataset.bin "
+        "--step_scheduler.global_batch_size={GLOBAL_BATCH_SIZE} "
+        "--step_scheduler.local_batch_size={LOCAL_BATCH_SIZE} "
+        "--step_scheduler.max_steps={MAX_STEPS} "
+        "--step_scheduler.ckpt_every_steps={CHECKPOINT_INTERVAL} "
+        "--step_scheduler.save_checkpoint_every_epoch=false "
+        "--checkpoint.checkpoint_dir={CHECKPOINT_DIR} "
+        "--checkpoint.max_recent_checkpoints=3 "
+        "--loss_fn._target_={LOSS_TARGET} "
+        "--model.torch_dtype=float16 "
+        "--distributed.mp_policy.param_dtype=torch.float16 "
+        "--distributed.mp_policy.output_dtype=torch.float16"
+    )
+else:
+    print("Full 1B-token training is disabled until the smoke test passes.")
 """,
             ),
         ],

@@ -274,7 +274,12 @@ worker；保持默认单进程加载即可。
 ## Kaggle checkpoint
 
 `kaggle_deployment/train_gpt2_t4x2.ipynb` is the deployment recipe for a 1B-token
-FineWeb run on exactly two Kaggle T4 GPUs. It uses FP16, `local_batch_size=4`,
+FineWeb run on exactly two Kaggle T4 GPUs. It first runs a 1M-token smoke test that
+checks Kaggle Secret loading, FineWeb download, tokenization, binary writing, two-rank
+FP16 FSDP, the T4-compatible loss, backward, and one optimizer update. Complete that
+cell successfully before setting `RUN_FULL_TRAINING = True`; the 1B-token workflow is
+deliberately disabled by default. Create a Kaggle Secret named `HF_TOKEN`; its value is
+loaded at runtime and is never stored in the notebook or repository. Full training uses FP16, `local_batch_size=4`,
 `global_batch_size=32`, and `max_steps=30,517`, which consumes 999,981,056 full-batch
 tokens. This gives four gradient-accumulation steps and is the conservative setting for
 Kaggle T4 memory after a first-backward OOM at local batch 8. The deployment overrides the

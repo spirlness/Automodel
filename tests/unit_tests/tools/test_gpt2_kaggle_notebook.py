@@ -36,13 +36,18 @@ def test_kaggle_notebook_uses_the_project_recipe_without_source_injection() -> N
     assert generator.BRANCH in source
     assert generator.RECIPE_PATH in source
     assert "nanogpt_data_processor.py" in source
-    assert "--max-tokens 1B" in source
+    assert "--max-tokens 1M" in source
+    assert "--chunk-size 16" in source
+    assert "--prefetch 4" in source
     assert "--nproc-per-node 2" in source
     assert "requires two Tesla T4 GPUs" in source
     assert "--step_scheduler.global_batch_size=32" in source
     assert "--step_scheduler.local_batch_size=4" in source
-    assert "--step_scheduler.max_steps=30517" in source
+    assert "--step_scheduler.max_steps=1" in source
+    assert "--checkpoint.enabled=false" in source
     assert "--checkpoint.max_recent_checkpoints=3" in source
+    assert 'UserSecretsClient().get_secret("HF_TOKEN")' in source
+    assert "RUN_FULL_TRAINING = False" in source
     assert generator.LOSS_TARGET in source
     assert "PYTORCH_ALLOC_CONF=expandable_segments:True" in source
     assert generator.MAX_STEPS == 1_000_000_000 // (generator.GLOBAL_BATCH_SIZE * 1024)
