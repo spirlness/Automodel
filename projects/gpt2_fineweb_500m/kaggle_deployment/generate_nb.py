@@ -20,7 +20,13 @@ from pathlib import Path
 REPOSITORY_URL = "https://github.com/spirlness/Automodel.git"
 BRANCH = "spirlness/feat/gpt2-fineweb-training"
 RECIPE_PATH = "projects/gpt2_fineweb_500m/config/gpt2_fineweb_500m.yaml"
-DATA_DIR = "/kaggle/working/fineweb"
+DATA_DIR = "/kaggle/working/fineweb_1B"
+CHECKPOINT_DIR = "/kaggle/working/checkpoints"
+MAX_TOKENS = "1B"
+GLOBAL_BATCH_SIZE = 32
+LOCAL_BATCH_SIZE = 16
+MAX_STEPS = 30517
+CHECKPOINT_INTERVAL = 10000
 
 
 def _code_cell(cell_id: str, source: str) -> dict[str, object]:
@@ -49,6 +55,8 @@ num_gpus = max(1, torch.cuda.device_count())
 print(f"GPU count: {num_gpus}")
 for index in range(num_gpus):
     print(torch.cuda.get_device_name(index))
+if num_gpus != 2:
+    raise RuntimeError(f"This notebook requires exactly two T4 GPUs, found {num_gpus}.")
 """,
             ),
             _code_cell(
@@ -67,22 +75,24 @@ for index in range(num_gpus):
   --dataset HuggingFaceFW/fineweb \\
   --set-name sample-10BT \\
   --output-dir {DATA_DIR} \\
-  --max-tokens 500M
+  --max-tokens {MAX_TOKENS}
 """,
             ),
             _code_cell(
                 "train",
-                f"""# Run the same recipe as the repository. T4 uses fp16 runtime overrides;
-# all architecture, optimizer grouping, loss, and data-processing code stays identical.
-import torch
-
-num_gpus = max(1, torch.cuda.device_count())
-global_batch_size = 32 if num_gpus >= 2 else 16
+                f"""# Train 1B tokens on two T4 GPUs. Use a 16-sample micro-batch on each
+# GPU and a global batch of 32, so no gradient accumulation is required.
+# Checkpoint retention is enforced by the project-owned checkpoint lifecycle.
 !uv run automodel {RECIPE_PATH} \\
-  --nproc-per-node {{num_gpus}} \\
-  --dataset.file_pattern={DATA_DIR}_max_tokens_500M/dataset.bin \\
-  --step_scheduler.global_batch_size={{global_batch_size}} \\
-  --step_scheduler.local_batch_size=4 \\
+  --nproc-per-node 2 \\
+  --dataset.file_pattern={DATA_DIR}_max_tokens_{MAX_TOKENS}/dataset.bin \\
+  --step_scheduler.global_batch_size={GLOBAL_BATCH_SIZE} \\
+  --step_scheduler.local_batch_size={LOCAL_BATCH_SIZE} \\
+  --step_scheduler.max_steps={MAX_STEPS} \\
+  --step_scheduler.ckpt_every_steps={CHECKPOINT_INTERVAL} \\
+  --step_scheduler.save_checkpoint_every_epoch=false \\
+  --checkpoint.checkpoint_dir={CHECKPOINT_DIR} \\
+  --checkpoint.max_recent_checkpoints=3 \\
   --model.torch_dtype=float16 \\
   --distributed.mp_policy.param_dtype=torch.float16 \\
   --distributed.mp_policy.output_dtype=torch.float16

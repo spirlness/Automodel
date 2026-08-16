@@ -36,6 +36,12 @@ def test_kaggle_notebook_uses_the_project_recipe_without_source_injection() -> N
     assert generator.BRANCH in source
     assert generator.RECIPE_PATH in source
     assert "nanogpt_data_processor.py" in source
+    assert "--max-tokens 1B" in source
+    assert "--nproc-per-node 2" in source
+    assert "--step_scheduler.global_batch_size=32" in source
+    assert "--step_scheduler.local_batch_size=16" in source
+    assert "--step_scheduler.max_steps=30517" in source
+    assert "--checkpoint.max_recent_checkpoints=3" in source
     assert all(isinstance(cell["id"], str) and cell["id"] for cell in generator.build_notebook()["cells"])
     assert 'with open("nemo_automodel/components/models/gpt2.py"' not in source
     assert 'with open("nemo_automodel/components/optim/muon.py"' not in source

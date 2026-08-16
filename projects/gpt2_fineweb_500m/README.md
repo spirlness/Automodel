@@ -273,6 +273,14 @@ worker；保持默认单进程加载即可。
 
 ## Kaggle checkpoint
 
+`kaggle_deployment/train_gpt2_t4x2.ipynb` is the deployment recipe for a 1B-token
+FineWeb run on exactly two Kaggle T4 GPUs. It uses FP16, `local_batch_size=16`,
+`global_batch_size=32`, and `max_steps=30,517`, which consumes 999,981,056 full-batch
+tokens. Checkpoints are written to `/kaggle/working/checkpoints` every 10,000 steps;
+the native retention policy keeps only the most recent three checkpoint directories.
+The tokenized dataset is about 2 GB, leaving substantial headroom within Kaggle's 50 GB
+working-disk budget.
+
 ```bash
 uv run python projects/gpt2_fineweb_500m/scripts/download_kaggle_checkpoint.py
 ```
