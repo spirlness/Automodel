@@ -38,6 +38,7 @@ def test_kaggle_notebook_uses_the_project_recipe_without_source_injection() -> N
     assert "nanogpt_data_processor.py" in source
     assert "--max-tokens 1B" in source
     assert "--nproc-per-node 2" in source
+    assert "requires two Tesla T4 GPUs" in source
     assert "--step_scheduler.global_batch_size=32" in source
     assert "--step_scheduler.local_batch_size=4" in source
     assert "--step_scheduler.max_steps=30517" in source

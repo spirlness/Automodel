@@ -51,12 +51,16 @@ def build_notebook() -> dict[str, object]:
 !nvidia-smi
 import torch
 
-num_gpus = max(1, torch.cuda.device_count())
+num_gpus = torch.cuda.device_count()
+gpu_names = [torch.cuda.get_device_name(index) for index in range(num_gpus)]
 print(f"GPU count: {num_gpus}")
-for index in range(num_gpus):
-    print(torch.cuda.get_device_name(index))
-if num_gpus != 2:
-    raise RuntimeError(f"This notebook requires exactly two T4 GPUs, found {num_gpus}.")
+for index, name in enumerate(gpu_names):
+    print(f"GPU {index}: {name}")
+if num_gpus != 2 or any("T4" not in name for name in gpu_names):
+    raise RuntimeError(
+        "This training requires two Tesla T4 GPUs. In Kaggle, select GPU T4 x2; "
+        f"the allocated hardware is {gpu_names}."
+    )
 """,
             ),
             _code_cell(
