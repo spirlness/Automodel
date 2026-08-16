@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .dion import build_dion_optimizer, is_dion_optimizer
+from .muon import Muon
 from .optimizer import (
     OPTIMIZER_CONFIG_REGISTRY,
     AdamConfig,
@@ -21,6 +22,7 @@ from .optimizer import (
     DionConfig,
     FlashAdamWConfig,
     FusedAdamConfig,
+    LocalMuonConfig,
     LRSchedulerConfig,
     MuonConfig,
     NorMuonConfig,
@@ -41,6 +43,8 @@ __all__ = [
     "FlashAdamWConfig",
     "FusedAdamConfig",
     "LRSchedulerConfig",
+    "LocalMuonConfig",
+    "Muon",
     "MuonConfig",
     "NorMuonConfig",
     "OptimizerConfig",

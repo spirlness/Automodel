@@ -105,18 +105,15 @@ diffusion_kernels = [
     "nemo_automodel[diffusion]",
     "kernels",
 ]
-# nvidia-cudnn-cu12 pin: This is required for GPTOSS TE support + faster cudnn attention (only on Linux where CUDA is available)
+# nvidia-cudnn-cu12 pin: This is required for faster cudnn attention (only on Linux where CUDA is available)
 # "nvidia-cudnn-cu12>=9.18.0.0; sys_platform == 'linux'",
-# Flash-attn version should be selected to satisfy TE requirements
-# https://github.com/NVIDIA/TransformerEngine/blob/v2.4/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L108
+# Flash-attn version can be selected independently of Transformer Engine.
 # "flash-attn==2.8.1",
 cuda = [
     "causal-conv1d",
     "mamba-ssm",
     "nv-grouped-gemm",
-    # This is required to prevent ONNX errors arising from TE
     "onnxscript>=0.5.6",
-    "transformer-engine[pytorch]>=2.14.1",
     # DeepSeek-V4 TileLang kernels (enable backend.attn="tilelang": sparse MLA
     # attention, lightning indexer, and the external TileKernels MHC sinkhorn).
     "tilelang>=0.1.11",
@@ -252,8 +249,6 @@ no-build-isolation-package = [
     "magi_attention",
     "mamba-ssm",
     "nv-grouped-gemm",
-    "transformer-engine",
-    "transformer-engine-torch",
 ]
 constraint-dependencies = [
     "aiohttp>=3.14.3", # Address aiohttp security fixes through CVE-2026-69244
@@ -348,8 +343,6 @@ magi_attention = [
     "versioningit",
     "wheel",
 ]
-transformer-engine = [{ requirement = "torch", match-runtime = true }]
-transformer-engine-torch = [{ requirement = "torch", match-runtime = true }]
 nv_grouped_gemm = ["setuptools"]
 
 # Needed when building from source
@@ -372,6 +365,7 @@ requires-dist = ["torch", "packaging", "ninja", "setuptools"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = ["gpu: requires a CUDA-capable GPU"]
 
 [tool.coverage.paths]
 source = ["nemo_automodel", "/opt/Automodel/nemo_automodel", "/home/runner/work/Automodel/Automodel/nemo_automodel"]

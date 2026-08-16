@@ -4073,7 +4073,6 @@ all = [
     { name = "torchvision", version = "0.25.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "torchvision", version = "0.25.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin' and sys_platform != 'linux'" },
     { name = "torchvision", version = "0.25.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux'" },
-    { name = "transformer-engine", extra = ["pytorch"] },
 ]
 cli = [
     { name = "nemo-run" },
@@ -4087,7 +4086,6 @@ cuda = [
     { name = "onnxscript" },
     { name = "tile-kernels" },
     { name = "tilelang" },
-    { name = "transformer-engine", extra = ["pytorch"] },
 ]
 cuda-source = [
     { name = "bitsandbytes" },
@@ -4151,7 +4149,6 @@ moe = [
     { name = "onnxscript" },
     { name = "tile-kernels" },
     { name = "tilelang" },
-    { name = "transformer-engine", extra = ["pytorch"] },
 ]
 msc = [
     { name = "multi-storage-client" },
@@ -4298,7 +4295,6 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform == 'darwin' and extra == 'diffusion'", index = "https://pypi.org/simple" },
     { name = "torchvision", marker = "sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'diffusion'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'diffusion'", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "transformer-engine", extras = ["pytorch"], marker = "extra == 'cuda'", specifier = ">=2.14.1" },
     { name = "transformers", specifier = "==5.12.1" },
     { name = "wandb", specifier = ">=0.28.0" },
 ]
@@ -4738,20 +4734,6 @@ dependencies = [
     { name = "torch", version = "2.10.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/02/ad/046a097b63a96c1ba1d85f0031dbe7fcbdb33e6c445dfbaba2ffaefdd497/nv_grouped_gemm-1.1.4.post8.tar.gz", hash = "sha256:ab321693f0292cfd8a26dc7b6f14decd9eb00e209494de7218e4fad36191275d", size = 20821209, upload-time = "2025-12-17T02:22:38.432Z" }
-
-[[package]]
-name = "nvdlfw-inspect"
-version = "0.2.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyyaml" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin' and sys_platform != 'linux'" },
-    { name = "torch", version = "2.10.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/86/94188e03e5d4dd7b73c390b0cddcde5618b3799c18e327b2bf15763f6137/nvdlfw_inspect-0.2.2-py3-none-any.whl", hash = "sha256:8a4dc2814c5a4cd19ae304170b9bfa514538ef3c3eb243a45a82404ec3cb279d", size = 30964, upload-time = "2025-12-03T10:52:01.933Z" },
-]
 
 [[package]]
 name = "nvidia-cublas"
@@ -8568,51 +8550,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/a8/4b/29b4ef32e036bb34e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/30/dc54f88dd4a2b5dc8a0279bdd7270e735851848b762aeb1c1184ed1f6b14/tqdm-4.67.1-py3-none-any.whl", hash = "sha256:26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2", size = 78540, upload-time = "2024-11-24T20:12:19.698Z" },
 ]
-
-[[package]]
-name = "transformer-engine"
-version = "2.15.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/cd/9febfe6ea848541ffede5b8bc87aa8900e6cc8182eb847ca636bb5001ded/transformer_engine-2.15.0-py3-none-any.whl", hash = "sha256:4015c5b9a7aa420f4f123e49ea795de31ae6f781fa1180c118d0ee40525eed8d", size = 875175, upload-time = "2026-05-11T17:58:23.756Z" },
-]
-
-[package.optional-dependencies]
-pytorch = [
-    { name = "transformer-engine-torch" },
-]
-
-[[package]]
-name = "transformer-engine-cu13"
-version = "2.15.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "importlib-metadata" },
-    { name = "packaging" },
-    { name = "pydantic" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/4b/2496a318dbeba8d79e622582d38ef01040f0d27f362b023a2c91950c086a/transformer_engine_cu13-2.15.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:fc386c8b9d7c6ab284dd5c06e7266633402345536eb57c7380433df03f567383", size = 184620920, upload-time = "2026-05-11T17:58:39.136Z" },
-    { url = "https://files.pythonhosted.org/packages/f9/15/b260b4e570ac35d6a89aea6b2a79d837d66ad387daad338404e338594a18/transformer_engine_cu13-2.15.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:54d7b9a6e570eba4bc0394b25a611ad6ed3cecbe1b1ebf9c337cf5fed9c22f34", size = 185772408, upload-time = "2026-05-11T17:58:49.474Z" },
-]
-
-[[package]]
-name = "transformer-engine-torch"
-version = "2.15.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "einops" },
-    { name = "nvdlfw-inspect" },
-    { name = "onnx" },
-    { name = "onnxscript" },
-    { name = "packaging" },
-    { name = "pydantic" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin' and sys_platform != 'linux'" },
-    { name = "torch", version = "2.10.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux'" },
-    { name = "transformer-engine-cu13" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/8f/72/903015a80c5c39b715a5865d24ad4d1db00025e7f72c985764fd9a9c3843/transformer_engine_torch-2.15.0.tar.gz", hash = "sha256:883a222c342be7df1551e0d9038a124555422ee554d15a789609758352eaf8b2", size = 319826, upload-time = "2026-05-11T17:58:31.131Z" }
 
 [[package]]
 name = "transformers"

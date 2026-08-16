@@ -22,13 +22,14 @@ with `BinTokenDataset` for efficient streaming pre-training.
 Usage (typical):
 
 ```bash
-python tools/nanogpt_data_processor.py \
+python projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py \
     --dataset HuggingFaceFW/fineweb \
     --set-name sample-10BT \
     --max-tokens 500M
 ```
 
-See the make_parser function for CLI options or run `python tools/nanogpt_data_processor.py --help`.
+See the make_parser function for CLI options or run
+`python projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py --help`.
 """
 
 import argparse
@@ -187,13 +188,23 @@ def make_parser():
         default=32768,
         help="Maximum length of the tokens to encode. If the text's token length exceeds this, it will be truncated.",
     )
+    parser.add_argument(
+        "--local-parquet-dir",
+        type=str,
+        default=None,
+        help=(
+            "Path to a local directory of .parquet files to process offline instead of "
+            "streaming from the HF hub (useful when hub access is slow or unstable). "
+            "All .parquet files under this directory (recursively) are loaded."
+        ),
+    )
     return parser
 
 
 class BinaryDataWriter:
     """Write tokenized samples and BOS offsets to binary dataset files."""
 
-    def __init__(self, filename, bos_token_id, vocab_size):
+    def __init__(self, filename: str, bos_token_id: int, vocab_size: int) -> None:
         """
         Initialize the binary data writer.
 
@@ -212,10 +223,10 @@ class BinaryDataWriter:
         self.bos_token_id = bos_token_id
         # allow both instance and type
         if vocab_size < 2**16:
-            dtype = np.uint16()
+            dtype = np.dtype(np.uint16)
             print(f"Using uint16 for vocab size {vocab_size}")
         elif vocab_size < 2**32:
-            dtype = np.uint32()
+            dtype = np.dtype(np.uint32)
             print(f"Using uint32 for vocab size {vocab_size}")
         else:
             raise ValueError(f"Vocab size {vocab_size} is too large for uint32")
@@ -232,7 +243,7 @@ class BinaryDataWriter:
         self.idx_fp = None
         self.bytes_written = 0
 
-    def _write_header(self):
+    def _write_header(self) -> tuple[object, object]:
         """
         Write the header to the binary and index files.
         """
@@ -241,7 +252,7 @@ class BinaryDataWriter:
         idx_fp = open(self.filename.replace(".bin", ".bos.idx"), "wb")
         return bin_fp, idx_fp
 
-    def write(self, tokens: np.ndarray | list):
+    def write(self, tokens: np.ndarray | list[int], *, max_tokens: int | None = None) -> int:
         """
         Write tokens to the binary and index files.
 
@@ -250,47 +261,59 @@ class BinaryDataWriter:
                 Tokens to write to the binary and index files.
 
         Returns:
-            int: Number of tokens written.
+            max_tokens: Maximum number of tokens allowed in the completed shard.
+
+        Returns:
+            Number of tokens written.
         """
         if self.bin_fp is None:
             self.bin_fp, self.idx_fp = self._write_header()
 
-        if isinstance(tokens, list):
-            tokens = np.array(tokens)
-            assert (0 <= tokens).all() and (tokens < 2 ** (self.dtype.itemsize * 8)).all(), (
-                "token dictionary too large for uint16"
-            )
-            tokens = tokens.astype(self.dtype)
+        tokens = np.asarray(tokens)
+        if tokens.ndim != 1:
+            raise ValueError(f"tokens must be one-dimensional, got shape {tokens.shape}")
+        token_limit = np.iinfo(self.dtype).max
+        if tokens.size and (tokens.min() < 0 or tokens.max() > token_limit):
+            raise ValueError(f"token IDs must be in [0, {token_limit}] for {self.dtype.name}")
+        if max_tokens is not None:
+            remaining = max_tokens - self.items_written
+            if remaining <= 0:
+                return 0
+            tokens = tokens[:remaining]
+        tokens = tokens.astype(self.dtype, copy=False)
+        if self.items_written + tokens.size > np.iinfo(np.int32).max:
+            raise ValueError("dataset contains too many tokens for the int32 header")
 
-        pos = self.bin_fp.tell()
-        assert pos + tokens.size * self.dtype.itemsize < 2**32 - 1, "token count too large"
-        # write chunk tokens
+        token_start = self.items_written
         tok_bytes = tokens.tobytes()
         self.bin_fp.write(tok_bytes)
-
-        # write BOS index
-        self.idx_fp.write((pos + np.where(tokens == self.bos_token_id)[0].astype(np.int32)).tobytes())
+        bos_positions = token_start + np.flatnonzero(tokens == self.bos_token_id)
+        self.idx_fp.write(bos_positions.astype(np.int32, copy=False).tobytes())
         self.bytes_written += len(tok_bytes)
-        return len(tok_bytes)
+        return int(tokens.size)
 
-    def __del__(self):
-        """
-        Close the binary and index files.
-
-        Writes the number of tokens written to the header.
-        """
+    def close(self) -> None:
+        """Finalize the binary header and close open file handles."""
         if self.bin_fp is not None:
-            # Write the number of tokens written to the header
-            self.bin_fp.seek(2 * 4, 0)
-            b = np.zeros(1, dtype=np.int32)
-            b[0] = self.items_written
-            self.bin_fp.write(b.tobytes())
+            self.header[2] = self.items_written
+            self.bin_fp.seek(0)
+            self.bin_fp.write(self.header.tobytes())
             self.bin_fp.close()
+            self.bin_fp = None
         if self.idx_fp is not None:
             self.idx_fp.close()
+            self.idx_fp = None
+
+    def __enter__(self) -> "BinaryDataWriter":
+        """Return this writer for use as a context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Finalize files even when preprocessing exits with an exception."""
+        self.close()
 
     @property
-    def items_written(self):
+    def items_written(self) -> int:
         """
         Return the number of tokens written (bytes / dtype.itemsize)
         """
@@ -304,6 +327,7 @@ def dataset_reader(
     data_cache_dir: str | None,
     out_queue: "mp.Queue",
     chunk_size: int,
+    local_parquet_dir: str | None = None,
 ):
     """
     Stream the dataset and push samples to out_queue.
@@ -312,7 +336,7 @@ def dataset_reader(
         dataset_name: str
             The dataset identifier on the HuggingFace hub (e.g. ``"HuggingFaceFW/fineweb"``).
         set_name: str
-            Name of the subset / configuration to use (e.g. ``"sample-10BT"``).
+            Name of the subset / configuration to use (e.g. ``"sample-10BT"`` for fineweb).
         split: str
             Which split to stream (e.g. ``"train"``).
         data_cache_dir: str | None
@@ -323,18 +347,37 @@ def dataset_reader(
             sentinel is pushed after the stream ends to signal completion.
         chunk_size: int
             Number of samples to read from the dataset at a time.
+        local_parquet_dir: str | None
+            If set, read .parquet files from this local directory (recursively)
+            instead of streaming from the HuggingFace hub.
     """
 
     from datasets import load_dataset
 
-    # HF dataset streaming loader
-    dataset_iter = load_dataset(
-        dataset_name,
-        name=set_name,
-        split=split,
-        streaming=True,
-        cache_dir=data_cache_dir,
-    )
+    if local_parquet_dir is not None:
+        # Offline mode: load all local .parquet files under the directory.
+        import glob as glob_module
+
+        parquet_files = sorted(glob_module.glob(os.path.join(local_parquet_dir, "**", "*.parquet"), recursive=True))
+        if not parquet_files:
+            raise FileNotFoundError(f"No .parquet files found under {local_parquet_dir}")
+        print(f"Loading {len(parquet_files)} local parquet files from {local_parquet_dir}", flush=True)
+        dataset_iter = load_dataset(
+            "parquet",
+            data_files=parquet_files,
+            split=split,
+            streaming=True,
+            cache_dir=data_cache_dir,
+        )
+    else:
+        # HF dataset streaming loader
+        dataset_iter = load_dataset(
+            dataset_name,
+            name=set_name,
+            split=split,
+            streaming=True,
+            cache_dir=data_cache_dir,
+        )
 
     try:
         chunk = []
@@ -389,7 +432,7 @@ def tokenize_chunk(chunk: list[dict], tokenizer_name: str, max_length: int) -> l
     tokenizer, bos_token_id = _get_tokenizer(tokenizer_name)  # first call builds, later calls reuse
     out = []
     for doc in chunk:
-        tokens = tokenizer.encode(doc["text"], max_length=max_length, truncation=False)
+        tokens = tokenizer.encode(doc["text"], max_length=max_length, truncation=True)
         if tokens and tokens[0] != bos_token_id:
             tokens = [bos_token_id] + tokens
         out.append(tokens)
@@ -441,6 +484,7 @@ def main(args):
             data_cache_dir,
             data_queue,
             args.chunk_size,
+            args.local_parquet_dir,
         ),
         daemon=True,
     )
@@ -455,48 +499,45 @@ def main(args):
     )
     del tokenizer
 
-    # Parallel tokenisation workers
-    futures: list[concurrent.futures.Future] = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-        # Keep looping until dataset stream is exhausted *and* all futures done.
-        stream_finished = False
-        while not stream_finished or futures:
-            # Pull raw samples from the queue to build chunks
-            while not stream_finished or len(futures) < args.num_workers * args.prefetch:
-                try:
-                    chunk = data_queue.get(block=False)
-                except queue.Empty:  # No new sample available right now - proceed to consume futures.
-                    break
-                if chunk is None:  # Sentinel received - no more data coming.
-                    stream_finished = True
-                    break
-                futures.append(executor.submit(tokenize_chunk, chunk, args.tokenizer, args.max_length))
+    try:
+        with writer, concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            futures: list[concurrent.futures.Future] = []
+            max_pending = max(1, args.num_workers * args.prefetch)
+            stream_finished = False
+            while not stream_finished or futures:
+                while not stream_finished and len(futures) < max_pending:
+                    try:
+                        chunk = data_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if chunk is None:
+                        stream_finished = True
+                        break
+                    futures.append(executor.submit(tokenize_chunk, chunk, args.tokenizer, args.max_length))
 
-            # Consume completed futures to write tokens to disk
-            max_i = 0
-            for i in range(len(futures)):
-                if not futures[i].done():  # early exit if future is not done
+                if not futures:
+                    if not stream_finished:
+                        chunk = data_queue.get()
+                        if chunk is None:
+                            stream_finished = True
+                        else:
+                            futures.append(executor.submit(tokenize_chunk, chunk, args.tokenizer, args.max_length))
+                    continue
+
+                for tokens in futures.pop(0).result():
+                    writer.write(tokens, max_tokens=args.max_tokens)
+                    if writer.items_written == args.max_tokens:
+                        break
+                if writer.items_written == args.max_tokens:
+                    for future in futures:
+                        future.cancel()
                     break
-                for tokens in futures[i].result():
-                    writer.write(tokens)
-                max_i = i + 1
-            futures = futures[max_i:]
-
-            # Stop early if token budget exhausted
-            if writer.items_written >= args.max_tokens:
-                for fut in futures:
-                    fut.cancel()
-                break
-
-    del futures
-    # Explicitly close queue to prevent leaked semaphores at interpreter shutdown.
-    if reader_proc.is_alive():
-        reader_proc.terminate()
+    finally:
+        if reader_proc.is_alive():
+            reader_proc.terminate()
         reader_proc.join()
-    assert not reader_proc.is_alive()
-    # close queue
-    data_queue.close()
-    data_queue.join_thread()
+        data_queue.close()
+        data_queue.join_thread()
 
 
 if __name__ == "__main__":

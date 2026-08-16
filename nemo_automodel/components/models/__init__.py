@@ -14,7 +14,7 @@
 """Convenience model builders for NeMo Automodel.
 
 Currently includes:
-    • build_gpt2_model – returns a GPT-2 causal language model (Flash-Attention-2 by default).
+    • build_gpt2_model – returns a GPT-2 causal language model using PyTorch SDPA.
 """
 
 import importlib.abc

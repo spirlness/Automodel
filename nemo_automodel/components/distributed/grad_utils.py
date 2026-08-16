@@ -43,7 +43,7 @@ def clip_grad_by_total_norm_(
         parameters = [parameters]
 
     # Grads.
-    grads = [to_local_if_dtensor(p.grad.detach()).to(dtype) for p in parameters if p.grad is not None]
+    grads = [to_local_if_dtensor(p.grad.detach()) for p in parameters if p.grad is not None]
 
     # Scale.
     clip_coeff = max_grad_norm / (total_norm + 1.0e-6)

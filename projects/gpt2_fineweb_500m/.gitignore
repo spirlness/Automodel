@@ -1,0 +1,7 @@
+# Generated training artifacts. Recreate them locally; do not version data or model weights.
+data/
+checkpoints/
+
+# Python and notebook runtime artifacts.
+__pycache__/
+.ipynb_checkpoints/

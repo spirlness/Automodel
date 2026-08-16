@@ -47,7 +47,9 @@ def is_dion_optimizer(optimizer_factory: Any) -> bool:
     """Return whether an optimizer factory targets a Dion-family optimizer."""
     name = getattr(optimizer_factory, "__name__", "")
     module = getattr(optimizer_factory, "__module__", "")
-    return module.startswith("dion") or name in {"Dion", "Dion2", "Muon", "NorMuon"}
+    return module.startswith("dion") or (
+        name in {"Dion", "Dion2", "Muon", "NorMuon"} and not module.startswith("nemo_automodel.components.optim.muon")
+    )
 
 
 def _separate_param_groups(

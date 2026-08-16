@@ -1,0 +1,108 @@
+# Modern nanoGPT (124M) SOTA Pretraining Recipe on FineWeb 500M Tokens with Muon Optimizer
+# Features:
+# 1. Muon (Momentum Orthogonalized by Newton-Schulz) Matrix Optimizer (lr=0.02)
+# 2. Bias-Free Linear & Normalization (bias=False everywhere)
+# 3. Hardware-Aligned Vocab Sizing (vocab_size=50304)
+# 4. RMSNorm for low-latency memory-efficient normalization
+# 5. Scaled Residual Projection Initialization (0.02 / sqrt(2 * n_layer))
+# 6. Rotary Position Embeddings (RoPE) + SwiGLU Gated FFN + Zero-Dropout + TF32
+
+recipe: TrainFinetuneRecipeForNextTokenPrediction
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 8
+  ckpt_every_steps: 500
+  val_every_steps: 100
+  num_epochs: 1
+  # floor(500_000_000 / (16 * 1024)); the remaining 9,472 tokens cannot form a full global batch.
+  max_steps: 30517
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 2
+
+# Enable TensorFloat-32 Tensor Cores for float32 matrix multiplications on Ampere and newer GPUs.
+performance:
+  float32_matmul_precision: high
+
+# Model: Modern nanoGPT (RoPE + RMSNorm + SwiGLU + Zero-Bias + 50304 Vocab)
+model:
+  _target_: nemo_automodel.components.models.gpt2.build_gpt2_model
+  vocab_size: 50304    # Hardware Tensor-Core aligned multiple of 64
+  n_positions: 1024
+  n_embd: 768
+  n_layer: 12
+  n_head: 12
+  bias: false          # Pure dense GEMMs without bias addition epilogues
+  use_rope: true       # Rotary Position Embeddings
+  norm_type: "rmsnorm" # RMSNorm for reduced memory traffic
+  mlp_type: "swiglu"   # SwiGLU gated FFN for enhanced capacity & faster convergence
+  dropout: 0.0         # Pretraining best practice: zero dropout
+  attn_implementation: "sdpa"  # This model uses PyTorch SDPA, not the flash-attn package directly.
+  torch_dtype: bfloat16
+
+# Dataset: FineWeb 500M token zero-copy memory-mapped binary shards
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: "projects/gpt2_fineweb_500m/data/fineweb_500M_max_tokens_500M/dataset.bin"
+  seq_len: 1024
+  shuffle_files: true
+  align_to_bos: false
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+# Loss function
+loss_fn:
+  _target_: nemo_automodel.components.loss.linear_ce.FusedLinearCrossEntropy
+  logit_softcapping: 30.0
+
+# Gradient Clipping
+clip_grad_norm:
+  max_norm: 1.0
+
+# Optimizer: Muon for transformer matrices; AdamW for embeddings, lm head, and norms.
+optimizer:
+  _target_: nemo_automodel.components.optim.muon.Muon
+  lr: 0.02
+  momentum: 0.95
+  nesterov: true
+  ns_steps: 5
+  weight_decay: 0.01
+  scalar_lr: 0.0006
+  embedding_lr: 0.0006
+  adamw_betas: [0.9, 0.95]
+  adamw_eps: 1.0e-8
+
+# Learning Rate Scheduler: Cosine Decay with 200-step Warmup
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 200
+  min_lr: 0.002
+
+# Distributed & Compilation & Mixed Precision
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+  enable_compile: true
+  mp_policy:
+    param_dtype: torch.bfloat16
+    reduce_dtype: torch.float32
+    output_dtype: torch.bfloat16
+
+# Checkpointing
+checkpoint:
+  enabled: true
+  checkpoint_dir: projects/gpt2_fineweb_500m/checkpoints/gpt2_fineweb_500m/
+  # The previous single-group Muon checkpoints have incompatible optimizer state.
+  # Start a new run; only set this for checkpoints created with the grouped optimizer.
+  restore_from: null
+  model_save_format: torch_save
+  save_consolidated: false
+  max_recent_checkpoints: 3
