@@ -2590,6 +2590,7 @@ def test_forward_backward_step_shards_global_mtp_inputs_and_targets(monkeypatch)
     """The recipe consumes raw packed lengths, shifts globally, then reuses the CP layout."""
     from nemo_automodel.components.models.common.mtp import (
         MTPConfig,
+        prepare_mtp_context_parallel_inputs,
     )
 
     captured = {}
@@ -2602,6 +2603,13 @@ def test_forward_backward_step_shards_global_mtp_inputs_and_targets(monkeypatch)
             self.mtp_config = MTPConfig(num_layers=1, layer_pattern="*")
             self.sharder_resolved = False
             self.supports = SimpleNamespace(mtp_enabled=True, supports_mtp_cp=True)
+
+        def prepare_mtp_inputs_for_cp(self, batch, *, ignore_index=-100):
+            return prepare_mtp_context_parallel_inputs(
+                batch,
+                num_depths=self.mtp_config.num_layers,
+                ignore_index=ignore_index,
+            )
 
         def forward(
             self,

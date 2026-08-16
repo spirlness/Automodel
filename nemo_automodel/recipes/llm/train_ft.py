@@ -75,7 +75,6 @@ from nemo_automodel.components.loss.linear_ce import FusedLinearCrossEntropy
 from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy
 from nemo_automodel.components.loss.mtp import calculate_mtp_loss
 from nemo_automodel.components.loss.utils import _get_lm_head_weight, calculate_loss
-from nemo_automodel.components.models.common.mtp import prepare_mtp_context_parallel_inputs
 from nemo_automodel.components.quantization.fp8 import build_fp8_config
 from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 from nemo_automodel.components.training.rng import ScopedRNG, StatefulRNG
@@ -1046,13 +1045,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             num_chunks=self.pp.pp_batch_size // self.pp.pp_microbatch_size if self.pp_enabled else 1,
         )
         if not self.pp_enabled and self._get_cp_group_size() > 1 and mtp_enabled:
-            mtp_config = getattr(model, "mtp_config", None)
-            num_depths = int(getattr(mtp_config, "num_layers", 0) or 0)
-            if num_depths <= 0:
-                raise ValueError("MTP is enabled but model.mtp_config.num_layers is not positive")
-            mtp_cp_inputs = prepare_mtp_context_parallel_inputs(
+            mtp_cp_inputs = model.prepare_mtp_inputs_for_cp(
                 batch,
-                num_depths=num_depths,
                 ignore_index=self.cfg.mtp.ignore_index,
             )
         train_ctx, batch = cp_sharder.shard(batch)

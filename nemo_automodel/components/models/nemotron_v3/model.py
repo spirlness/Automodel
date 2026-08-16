@@ -29,6 +29,7 @@ from nemo_automodel.components.models.common import (
     initialize_linear_module,
     initialize_rms_norm_module,
 )
+from nemo_automodel.components.models.common.mtp import MTPContextParallelInputs, prepare_mtp_context_parallel_inputs
 from nemo_automodel.components.models.common.tie_word_embeddings import (
     TieSupport,
     reject_unsupported_tie_word_embeddings,
@@ -584,6 +585,14 @@ class NemotronHForCausalLM(HFCheckpointingMixin, GenerationMixin, nn.Module, MoE
             cur_input_ids = roll_tensor(cur_input_ids, shifts=-1, dim=-1)
             embeds.append(self.model.embed_tokens(cur_input_ids))
         return tuple(embeds)
+
+    def prepare_mtp_inputs_for_cp(self, batch: dict[str, Any], *, ignore_index: int = -100) -> MTPContextParallelInputs:
+        """Prepare Nemotron's future-token MTP streams in global sequence order."""
+        return prepare_mtp_context_parallel_inputs(
+            batch,
+            num_depths=self.mtp_config.num_layers,
+            ignore_index=ignore_index,
+        )
 
     def customize_pipeline_stage_modules(
         self,
