@@ -103,6 +103,19 @@ class CausalSelfAttention(nn.Module):
         if use_rope:
             self.register_buffer("freqs_real", precompute_rope_freqs(self.head_dim, max_seq_len), persistent=False)
 
+    def _apply(self, fn):
+        """Apply dtype/device conversion while retaining the RoPE cache in fp32."""
+        freqs_real = self._buffers.pop("freqs_real", None)
+        try:
+            return super()._apply(fn)
+        finally:
+            if freqs_real is not None:
+                self.register_buffer(
+                    "freqs_real",
+                    freqs_real.to(device=self.qkv_proj.weight.device, dtype=torch.float32),
+                    persistent=False,
+                )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, T, C)
         bsz, seq_len, _ = x.shape
 

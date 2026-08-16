@@ -40,6 +40,12 @@ def test_build_local_gpt2_with_bfloat16_parameters() -> None:
 
     assert model.wte.weight.dtype is torch.bfloat16
     assert model.lm_head.weight is model.wte.weight
+    assert model.h[0].attn.freqs_real.dtype is torch.float32
+    assert model.h[0].attn.freqs_real.device == model.wte.weight.device
+
+    fp16_model = build_gpt2_model(vocab_size=32, n_positions=4, n_embd=8, n_layer=1, n_head=2, torch_dtype="float16")
+    assert fp16_model.h[0].attn.freqs_real.dtype is torch.float32
+    assert fp16_model.h[0].attn.freqs_real.device == fp16_model.wte.weight.device
 
 
 def test_local_gpt2_requires_sdpa() -> None:
