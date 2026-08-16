@@ -27,6 +27,7 @@ GLOBAL_BATCH_SIZE = 32
 LOCAL_BATCH_SIZE = 4
 MAX_STEPS = 30517
 CHECKPOINT_INTERVAL = 10000
+LOSS_TARGET = "nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy"
 
 
 def _code_cell(cell_id: str, source: str) -> dict[str, object]:
@@ -87,7 +88,8 @@ if num_gpus != 2 or any("T4" not in name for name in gpu_names):
                 f"""# Train 1B tokens on two T4 GPUs. A four-sample micro-batch is the
 # conservative T4 setting after the observed first-backward OOM; global batch 32
 # therefore uses four gradient-accumulation steps. Checkpoint retention is enforced
-# by the project-owned checkpoint lifecycle.
+# by the project-owned checkpoint lifecycle. T4 supports at most 64 KiB shared
+# memory per block, so use logits-based CE instead of the incompatible fused Triton CE.
 !PYTORCH_ALLOC_CONF=expandable_segments:True uv run automodel {RECIPE_PATH} \\
   --nproc-per-node 2 \\
   --dataset.file_pattern={DATA_DIR}_max_tokens_{MAX_TOKENS}/dataset.bin \\
@@ -98,6 +100,7 @@ if num_gpus != 2 or any("T4" not in name for name in gpu_names):
   --step_scheduler.save_checkpoint_every_epoch=false \\
   --checkpoint.checkpoint_dir={CHECKPOINT_DIR} \\
   --checkpoint.max_recent_checkpoints=3 \\
+  --loss_fn._target_={LOSS_TARGET} \\
   --model.torch_dtype=float16 \\
   --distributed.mp_policy.param_dtype=torch.float16 \\
   --distributed.mp_policy.output_dtype=torch.float16
