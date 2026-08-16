@@ -24,7 +24,7 @@ DATA_DIR = "/kaggle/working/fineweb_1B"
 CHECKPOINT_DIR = "/kaggle/working/checkpoints"
 MAX_TOKENS = "1B"
 GLOBAL_BATCH_SIZE = 32
-LOCAL_BATCH_SIZE = 16
+LOCAL_BATCH_SIZE = 4
 MAX_STEPS = 30517
 CHECKPOINT_INTERVAL = 10000
 
@@ -80,10 +80,11 @@ if num_gpus != 2:
             ),
             _code_cell(
                 "train",
-                f"""# Train 1B tokens on two T4 GPUs. Use a 16-sample micro-batch on each
-# GPU and a global batch of 32, so no gradient accumulation is required.
-# Checkpoint retention is enforced by the project-owned checkpoint lifecycle.
-!uv run automodel {RECIPE_PATH} \\
+                f"""# Train 1B tokens on two T4 GPUs. A four-sample micro-batch is the
+# conservative T4 setting after the observed first-backward OOM; global batch 32
+# therefore uses four gradient-accumulation steps. Checkpoint retention is enforced
+# by the project-owned checkpoint lifecycle.
+!PYTORCH_ALLOC_CONF=expandable_segments:True uv run automodel {RECIPE_PATH} \\
   --nproc-per-node 2 \\
   --dataset.file_pattern={DATA_DIR}_max_tokens_{MAX_TOKENS}/dataset.bin \\
   --step_scheduler.global_batch_size={GLOBAL_BATCH_SIZE} \\
