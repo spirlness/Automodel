@@ -1,11 +1,6 @@
-# Modern nanoGPT (124M) SOTA Pretraining Recipe on FineWeb 500M Tokens with Muon Optimizer
-# Features:
-# 1. Muon (Momentum Orthogonalized by Newton-Schulz) Matrix Optimizer (lr=0.02)
-# 2. Bias-Free Linear & Normalization (bias=False everywhere)
-# 3. Hardware-Aligned Vocab Sizing (vocab_size=50304)
-# 4. RMSNorm for low-latency memory-efficient normalization
-# 5. Scaled Residual Projection Initialization (0.02 / sqrt(2 * n_layer))
-# 6. Rotary Position Embeddings (RoPE) + SwiGLU Gated FFN + Zero-Dropout + TF32
+# Minimal GPT-2 (124M) pretraining recipe on FineWeb.
+# This intentionally uses only baseline AutoModel components: DDP, AdamW,
+# SDPA, and the regular masked cross-entropy loss.
 
 recipe: TrainFinetuneRecipeForNextTokenPrediction
 
@@ -22,7 +17,7 @@ dist_env:
   backend: nccl
   timeout_minutes: 2
 
-# Enable TensorFloat-32 Tensor Cores for float32 matrix multiplications on Ampere and newer GPUs.
+# Enable TensorFloat-32 where the GPU supports it.
 performance:
   float32_matmul_precision: high
 
@@ -55,27 +50,19 @@ dataloader:
   shuffle: false
   collate_fn: nemo_automodel.components.datasets.utils.default_collater
 
-# Loss function
 loss_fn:
-  _target_: nemo_automodel.components.loss.linear_ce.FusedLinearCrossEntropy
-  logit_softcapping: 30.0
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
 
 # Gradient Clipping
 clip_grad_norm:
   max_norm: 1.0
 
-# Optimizer: Muon for transformer matrices; AdamW for embeddings, lm head, and norms.
 optimizer:
-  _target_: nemo_automodel.components.optim.muon.Muon
-  lr: 0.02
-  momentum: 0.95
-  nesterov: true
-  ns_steps: 5
-  weight_decay: 0.01
-  scalar_lr: 0.0006
-  embedding_lr: 0.0006
-  adamw_betas: [0.9, 0.95]
-  adamw_eps: 1.0e-8
+  _target_: torch.optim.AdamW
+  lr: 0.0006
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
 
 # Learning Rate Scheduler: Cosine Decay with 200-step Warmup
 lr_scheduler:
@@ -83,25 +70,14 @@ lr_scheduler:
   lr_warmup_steps: 200
   min_lr: 0.002
 
-# Distributed & Compilation & Mixed Precision
+# Baseline data-parallel training. No FSDP2 or torch.compile is required.
 distributed:
-  strategy: fsdp2
-  dp_size: none
-  tp_size: 1
-  cp_size: 1
-  sequence_parallel: false
-  enable_compile: true
-  mp_policy:
-    param_dtype: torch.bfloat16
-    reduce_dtype: torch.float32
-    output_dtype: torch.bfloat16
+  strategy: ddp
 
 # Checkpointing
 checkpoint:
   enabled: true
   checkpoint_dir: projects/gpt2_fineweb_500m/checkpoints/gpt2_fineweb_500m/
-  # The previous single-group Muon checkpoints have incompatible optimizer state.
-  # Start a new run; only set this for checkpoints created with the grouped optimizer.
   restore_from: null
   model_save_format: torch_save
   save_consolidated: false

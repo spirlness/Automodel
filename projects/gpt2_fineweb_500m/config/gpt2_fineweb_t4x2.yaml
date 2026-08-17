@@ -1,15 +1,17 @@
-# Kaggle T4 x2 configuration. Keep this file self-contained: the loss target
-# and every constructor argument must agree.
+# Minimal Kaggle T4 x2 configuration.
+# Keep this recipe on the baseline AutoModel path: DDP, AdamW, SDPA, and the
+# regular masked cross-entropy loss. Optional kernels and custom optimizers are
+# deliberately not required.
 
 recipe: TrainFinetuneRecipeForNextTokenPrediction
 
 step_scheduler:
-  global_batch_size: 32
+  global_batch_size: 8
   local_batch_size: 4
   ckpt_every_steps: 10000
   val_every_steps: 1000000
   num_epochs: 1
-  max_steps: 30517  # floor(1_000_000_000 / (32 * 1024))
+  max_steps: 122070  # floor(1_000_000_000 / (8 * 1024))
 
 dist_env:
   backend: nccl
@@ -47,22 +49,16 @@ dataloader:
 
 loss_fn:
   _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
-  logit_softcapping: 30.0
 
 clip_grad_norm:
   max_norm: 1.0
 
 optimizer:
-  _target_: nemo_automodel.components.optim.muon.Muon
-  lr: 0.02
-  momentum: 0.95
-  nesterov: true
-  ns_steps: 5
-  weight_decay: 0.01
-  scalar_lr: 0.0006
-  embedding_lr: 0.0006
-  adamw_betas: [0.9, 0.95]
-  adamw_eps: 1.0e-8
+  _target_: torch.optim.AdamW
+  lr: 0.0006
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
 
 lr_scheduler:
   lr_decay_style: cosine
@@ -70,16 +66,7 @@ lr_scheduler:
   min_lr: 0.002
 
 distributed:
-  strategy: fsdp2
-  dp_size: none
-  tp_size: 1
-  cp_size: 1
-  sequence_parallel: false
-  enable_compile: true
-  mp_policy:
-    param_dtype: torch.float16
-    reduce_dtype: torch.float32
-    output_dtype: torch.float16
+  strategy: ddp
 
 checkpoint:
   enabled: true

@@ -36,27 +36,30 @@ def test_kaggle_notebook_uses_the_project_recipe_without_source_injection() -> N
     assert generator.SOURCE_COMMIT in source
     assert generator.RECIPE_PATH in source
     assert generator.RECIPE_PATH.endswith("gpt2_fineweb_t4x2.yaml")
+    assert generator.RECIPE_ABS_PATH.endswith("/projects/gpt2_fineweb_500m/config/gpt2_fineweb_t4x2.yaml")
+    assert 'os.chdir("/kaggle/working/Automodel")' in source
     assert "nanogpt_data_processor.py" in source
     assert "--max-tokens 1M" in source
-    assert "--chunk-size 16" in source
-    assert "--prefetch 4" in source
+    assert "--max-length 1024" in source
     assert "--nproc-per-node 2" in source
-    assert "requires two Tesla T4 GPUs" in source
-    assert "--step_scheduler.global_batch_size=32" in source
+    assert "Select Kaggle GPU T4 x2" in source
+    assert "--step_scheduler.global_batch_size=8" in source
     assert "--step_scheduler.local_batch_size=4" in source
     assert "--step_scheduler.max_steps=1" in source
     assert "--checkpoint.enabled=false" in source
     assert "--checkpoint.max_recent_checkpoints=3" in source
-    assert 'UserSecretsClient().get_secret("HF_TOKEN")' in source
-    assert "RUN_FULL_TRAINING = False" in source
+    assert 'cfg.optimizer._target_.__module__ == "torch.optim"' in source
+    assert 'cfg.distributed.strategy == "ddp"' in source
+    assert "RUN_FULL_TRAINING" not in source
     assert "parse_args_and_load_config" in source
-    assert "Config construction OK" in source
-    assert "PYTORCH_ALLOC_CONF=expandable_segments:True" in source
+    assert "Config OK:" in source
+    assert "--checkpoint.max_recent_checkpoints=3" in source
     assert generator.MAX_STEPS == 1_000_000_000 // (generator.GLOBAL_BATCH_SIZE * 1024)
-    assert generator.GLOBAL_BATCH_SIZE // (generator.LOCAL_BATCH_SIZE * 2) == 4
+    assert generator.GLOBAL_BATCH_SIZE // (generator.LOCAL_BATCH_SIZE * 2) == 1
     assert all(isinstance(cell["id"], str) and cell["id"] for cell in generator.build_notebook()["cells"])
-    assert 'with open("nemo_automodel/components/models/gpt2.py"' not in source
-    assert 'with open("nemo_automodel/components/optim/muon.py"' not in source
+    assert "Muon" not in source
+    assert "FSDP2" not in source
+    assert "torch.compile" not in source
 
 
 def test_checked_in_notebook_matches_generator() -> None:

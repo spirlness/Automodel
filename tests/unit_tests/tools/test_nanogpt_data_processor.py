@@ -18,7 +18,6 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from queue import Queue
 
 import numpy as np
 
@@ -46,54 +45,73 @@ def test_writer_enforces_budget_finalizes_header_and_uses_token_offsets(tmp_path
     assert bos_positions.tolist() == [0, 2]
 
 
-def test_tokenize_chunk_enables_truncation() -> None:
-    """The configured maximum length is passed to the tokenizer as a hard limit."""
+def test_tokenize_document_enforces_inclusive_length() -> None:
+    """The document limit includes the inserted BOS token."""
     processor = _load_processor_module()
 
     class Tokenizer:
-        bos_token_id = 9
-
         def __init__(self) -> None:
             self.kwargs = None
 
         def encode(self, text: str, **kwargs) -> list[int]:
             self.kwargs = kwargs
-            return [1, 2]
+            return [1, 2, 3]
 
     tokenizer = Tokenizer()
-    processor._get_tokenizer = lambda _: (tokenizer, tokenizer.bos_token_id)
-    processor.tokenize_chunk([{"text": "example"}], "test", 2)
+    tokens = processor.tokenize_document(tokenizer, "example", 3, bos_token_id=9)
 
-    assert tokenizer.kwargs == {"max_length": 2, "truncation": True}
+    assert tokens == [9, 1, 2]
+    assert tokenizer.kwargs == {"max_length": 2, "truncation": True, "add_special_tokens": False}
 
 
-def test_dataset_reader_reports_loader_errors_instead_of_hanging() -> None:
-    """A Hub failure must reach the parent process as an error message and done marker."""
+def test_tokenize_document_rejects_non_positive_length() -> None:
+    """Invalid document limits fail before invoking the tokenizer."""
     processor = _load_processor_module()
 
-    def failing_load_dataset(*_: object, **__: object) -> object:
-        raise RuntimeError("simulated Hub timeout")
+    class Tokenizer:
+        def encode(self, text: str, **kwargs) -> list[int]:
+            raise AssertionError("encode must not be called")
 
-    fake_datasets = types.SimpleNamespace(load_dataset=failing_load_dataset)
-    original_datasets = sys.modules.get("datasets")
-    sys.modules["datasets"] = fake_datasets
-    messages: Queue = Queue()
-    try:
-        processor.dataset_reader(
-            "HuggingFaceFW/fineweb",
-            "sample-10BT",
-            "train",
-            "/tmp/cache",
-            messages,
-            2,
-        )
-    finally:
-        if original_datasets is None:
-            sys.modules.pop("datasets", None)
-        else:
-            sys.modules["datasets"] = original_datasets
+    import pytest
 
-    kind, error = messages.get_nowait()
-    assert kind == "error"
-    assert "simulated Hub timeout" in error
-    assert messages.get_nowait() == ("done", None)
+    with pytest.raises(ValueError, match="max_length must be positive"):
+        processor.tokenize_document(Tokenizer(), "example", 0, bos_token_id=9)
+
+
+def test_main_writes_exact_budget_without_worker_processes(tmp_path: Path, monkeypatch) -> None:
+    """The sequential path stops inside a document at the exact token budget."""
+    processor = _load_processor_module()
+
+    class Tokenizer:
+        bos_token_id = 9
+
+        def __len__(self) -> int:
+            return 32
+
+        def encode(self, text: str, **kwargs) -> list[int]:
+            return [1, 2, 3]
+
+    class AutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs) -> Tokenizer:
+            return Tokenizer()
+
+    monkeypatch.setattr("transformers.AutoTokenizer", AutoTokenizer)
+    fake_datasets = types.SimpleNamespace(load_dataset=lambda *args, **kwargs: iter([{"text": "one"}, {"text": "two"}]))
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    args = processor.make_parser().parse_args(
+        [
+            "--output-dir",
+            str(tmp_path / "fineweb"),
+            "--max-tokens",
+            "5",
+            "--max-length",
+            "4",
+        ]
+    )
+    processor.main(args)
+
+    output = tmp_path / "fineweb_max_tokens_5" / "dataset.bin"
+    header = np.fromfile(output, dtype=np.int32, count=processor.HEADER_SIZE)
+    assert header[2] == 5

@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,265 +12,141 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-FineWeb dataset preprocessing script
+"""Create a simple streaming FineWeb binary dataset for the GPT-2 recipe.
 
-This tool downloads a dataset from the Hugging Face Hub (default: FineWeb),
-tokenizes the data (default: GPT-2 via transformers.AutoTokenizer), and writes memory-mapped binary shards compatible
-with `BinTokenDataset` for efficient streaming pre-training.
-
-Usage (typical):
-
-```bash
-python projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py \
-    --dataset HuggingFaceFW/fineweb \
-    --set-name sample-10BT \
-    --max-tokens 500M
-```
-
-See the make_parser function for CLI options or run
-`python projects/gpt2_fineweb_500m/tools/nanogpt_data_processor.py --help`.
+The processor intentionally uses one Python process. It opens the Hugging Face
+stream, tokenizes one document at a time, and writes immediately to the binary
+file. This is slower than a multi-process pipeline, but it has bounded memory,
+exact token-budget handling, and no worker or queue lifecycle to deadlock.
 """
 
 import argparse
-import concurrent.futures
 import json
 import logging
-import multiprocessing as mp
 import os
-import queue  # for Empty exception handling
 import time
-import traceback
-from functools import lru_cache
+from typing import Any
 
 import numpy as np
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 
 try:
-    from nemo_automodel.components.datasets.llm.nanogpt_dataset import (
-        HEADER_SIZE,
-        MAGIC,
-        VERSION,
-    )
+    from nemo_automodel.components.datasets.llm.nanogpt_dataset import HEADER_SIZE, MAGIC, VERSION
 except ImportError:
-    logging.warning("nemo_automodel not installed, using local constants; this is not recommended;")
-    logging.warning("Please install nemo_automodel or modify the PYTHONPATH to include the nemo_automodel directory")
+    logging.warning("nemo_automodel is not installed; using local dataset constants")
     HEADER_SIZE = 256
     MAGIC = 2788_95051
     VERSION = 1
 
 
+logger = logging.getLogger(__name__)
+
+
 class _parse_tokens_arg(int):
-    """An int subclass that can parse human-friendly token counts (e.g. 500M)."""
+    """Parse human-friendly token counts such as ``500M`` or ``1B``."""
 
     _UNIT_MULTIPLIER = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
 
-    def __new__(cls, value):
-        """
-        Parse a human-friendly token count (e.g. 500M) into an integer.
-
-        Args:
-            value: str | int
-                The token count to parse.
-
-        Returns:
-            int: The parsed token count.
-        """
+    def __new__(cls, value: str | int) -> "_parse_tokens_arg":
         if isinstance(value, int):
             return super().__new__(cls, value)
-        if value is None:
-            return super().__new__(cls, 0)
-        if isinstance(value, str):
-            val = value.strip()
-            if val.isdigit():
-                return super().__new__(cls, int(val))
-            import re
+        val = value.strip()
+        if val.isdigit():
+            return super().__new__(cls, int(val))
+        import re
 
-            m = re.fullmatch(r"(?i)(\d+(?:\.\d+)?)\s*([KMB])", val)
-            if m:
-                num = float(m.group(1))
-                unit = m.group(2).upper()
-                return super().__new__(cls, int(num * cls._UNIT_MULTIPLIER[unit]))
-        raise argparse.ArgumentTypeError(
-            f"Could not parse token count '{value}'. Expected integer or number followed by K/M/B."
-        )
+        match = re.fullmatch(r"(?i)(\d+(?:\.\d+)?)\s*([KMB])", val)
+        if match:
+            return super().__new__(cls, int(float(match.group(1)) * cls._UNIT_MULTIPLIER[match.group(2).upper()]))
+        raise argparse.ArgumentTypeError(f"Could not parse token count {value!r}; expected an integer or K/M/B value")
 
-    def __repr__(self):
-        """
-        Return a human-readable string representation of the token count.
-
-        Returns:
-            str: The human-readable string representation of the token count.
-        """
+    def __repr__(self) -> str:
         value = int(self)
-        if value >= 1_000_000_000 and value % 1_000_000_000 == 0:
-            return f"{value // 1_000_000_000}B"
-        if value >= 1_000_000 and value % 1_000_000 == 0:
-            return f"{value // 1_000_000}M"
-        if value >= 1_000 and value % 1_000 == 0:
-            return f"{value // 1_000}K"
+        for suffix, multiplier in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
+            if value >= multiplier and value % multiplier == 0:
+                return f"{value // multiplier}{suffix}"
         return str(value)
 
 
-def make_parser():
-    """
-    Create an argument parser for the data preprocessing script.
-
-    Returns:
-        argparse.ArgumentParser: The argument parser.
-    """
-    parser = argparse.ArgumentParser(description="Dataset preprocessing script")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="HuggingFaceFW/fineweb",
-        help="Dataset to use",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Output directory to write the dataset to. If not set, will use the dataset name.",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="train",
-        help="Split to use",
-    )
-    parser.add_argument(
-        "--set-name",
-        default="sample-10BT",
-        help="Split of fineweb to use; default: sample-10BT for fineweb.",
-    )
+def make_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for FineWeb preprocessing."""
+    parser = argparse.ArgumentParser(description="Stream, tokenize, and write a FineWeb binary dataset")
+    parser.add_argument("--dataset", default="HuggingFaceFW/fineweb", help="Hugging Face dataset identifier")
+    parser.add_argument("--output-dir", default=None, help="Output directory without the max-token suffix")
+    parser.add_argument("--split", default="train", help="Dataset split")
+    parser.add_argument("--set-name", default="sample-10BT", help="FineWeb configuration name")
     parser.add_argument(
         "-m",
         "--max_tokens",
         "--max-tokens",
         type=_parse_tokens_arg,
         default=2**32,
-        help=(
-            "If set, stop after processing this many tokens. "
-            "You can use K/M/B suffixes, e.g. 500M for 500 million tokens."
-        ),
+        help="Stop after this many tokens; accepts values such as 500M or 1B",
     )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=max(1, os.cpu_count() - 2),
-        help=("Number of workers to use for processing the dataset. If not set, will use all available cores minus 2."),
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        default="gpt2",
-        help="Tokenizer to use for tokenization; model-id on HF hub.",
-    )
-    parser.add_argument(
-        "--data-cache-dir",
-        type=str,
-        default=None,
-        help="Directory to cache the dataset",
-    )
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=256,
-        help="Number of sequences to use in each tokenizer worker",
-    )
-    parser.add_argument(
-        "--prefetch",
-        type=int,
-        default=128,
-        help="Number of chunks to prefetch from the dataset",
-    )
+    parser.add_argument("--tokenizer", default="gpt2", help="Tokenizer model ID")
+    parser.add_argument("--data-cache-dir", default=None, help="Hugging Face dataset cache directory")
     parser.add_argument(
         "--max-length",
         type=int,
         default=32768,
-        help="Maximum length of the tokens to encode. If the text's token length exceeds this, it will be truncated.",
+        help="Maximum tokens per document, including the inserted BOS token",
     )
     parser.add_argument(
         "--local-parquet-dir",
-        type=str,
         default=None,
-        help=(
-            "Path to a local directory of .parquet files to process offline instead of "
-            "streaming from the HF hub (useful when hub access is slow or unstable). "
-            "All .parquet files under this directory (recursively) are loaded."
-        ),
+        help="Optional local parquet directory for offline processing",
     )
     return parser
 
 
 class BinaryDataWriter:
-    """Write tokenized samples and BOS offsets to binary dataset files."""
+    """Write token IDs and BOS offsets to the NanoGPT binary format."""
 
     def __init__(self, filename: str, bos_token_id: int, vocab_size: int) -> None:
-        """
-        Initialize the binary data writer.
-
-        The binary file will be written to ``filename.bin`` and the index file
-        will be written to ``filename.bos.idx``.
+        """Initialize a writer for ``filename``.
 
         Args:
-            filename: str
-                Name of the binary file to write to.
-            dtype: np.dtype
-                Data type of the tokens.
-            vocab_size: int
-                Size of the vocabulary.
+            filename: Output ``.bin`` path.
+            bos_token_id: Token ID whose positions are written to ``.bos.idx``.
+            vocab_size: Vocabulary size used to select uint16 or uint32 storage.
         """
         self.filename = filename
         self.bos_token_id = bos_token_id
-        # allow both instance and type
         if vocab_size < 2**16:
-            dtype = np.dtype(np.uint16)
-            print(f"Using uint16 for vocab size {vocab_size}")
+            self.dtype = np.dtype(np.uint16)
         elif vocab_size < 2**32:
-            dtype = np.dtype(np.uint32)
-            print(f"Using uint32 for vocab size {vocab_size}")
+            self.dtype = np.dtype(np.uint32)
         else:
-            raise ValueError(f"Vocab size {vocab_size} is too large for uint32")
+            raise ValueError(f"Vocabulary size {vocab_size} is too large for uint32 storage")
+        logger.info("Using %s for vocabulary size %s", self.dtype.name, vocab_size)
 
-        self.dtype = dtype
-        # header
         self.header = np.zeros(HEADER_SIZE, dtype=np.int32)
         self.header[0] = MAGIC
         self.header[1] = VERSION
-        self.header[2] = 0  # number of tokens in *toks*
-        self.header[3] = dtype.itemsize  # bytes per token
-
+        self.header[3] = self.dtype.itemsize
         self.bin_fp = None
         self.idx_fp = None
         self.bytes_written = 0
 
-    def _write_header(self) -> tuple[object, object]:
-        """
-        Write the header to the binary and index files.
-        """
+    def _write_header(self) -> tuple[Any, Any]:
+        """Open output files and write the placeholder header."""
         bin_fp = open(self.filename, "wb")
-        bin_fp.write(self.header.tobytes())
         idx_fp = open(self.filename.replace(".bin", ".bos.idx"), "wb")
+        bin_fp.write(self.header.tobytes())
         return bin_fp, idx_fp
 
     def write(self, tokens: np.ndarray | list[int], *, max_tokens: int | None = None) -> int:
-        """
-        Write tokens to the binary and index files.
+        """Append one document and enforce the total token budget.
 
         Args:
-            tokens: np.ndarray | list
-                Tokens to write to the binary and index files.
+            tokens: One-dimensional token IDs.
+            max_tokens: Inclusive total dataset budget, if any.
 
         Returns:
-            max_tokens: Maximum number of tokens allowed in the completed shard.
-
-        Returns:
-            Number of tokens written.
+            Number of tokens written from this document.
         """
         if self.bin_fp is None:
             self.bin_fp, self.idx_fp = self._write_header()
-
         tokens = np.asarray(tokens)
         if tokens.ndim != 1:
             raise ValueError(f"tokens must be one-dimensional, got shape {tokens.shape}")
@@ -282,20 +158,24 @@ class BinaryDataWriter:
             if remaining <= 0:
                 return 0
             tokens = tokens[:remaining]
-        tokens = tokens.astype(self.dtype, copy=False)
         if self.items_written + tokens.size > np.iinfo(np.int32).max:
             raise ValueError("dataset contains too many tokens for the int32 header")
 
+        tokens = tokens.astype(self.dtype, copy=False)
         token_start = self.items_written
-        tok_bytes = tokens.tobytes()
-        self.bin_fp.write(tok_bytes)
+        self.bin_fp.write(tokens.tobytes())
         bos_positions = token_start + np.flatnonzero(tokens == self.bos_token_id)
         self.idx_fp.write(bos_positions.astype(np.int32, copy=False).tobytes())
-        self.bytes_written += len(tok_bytes)
+        self.bytes_written += tokens.nbytes
         return int(tokens.size)
 
+    @property
+    def items_written(self) -> int:
+        """Return the number of token IDs written so far."""
+        return self.bytes_written // self.dtype.itemsize
+
     def close(self) -> None:
-        """Finalize the binary header and close open file handles."""
+        """Finalize the token count in the header and close files."""
         if self.bin_fp is not None:
             self.header[2] = self.items_written
             self.bin_fp.seek(0)
@@ -307,292 +187,152 @@ class BinaryDataWriter:
             self.idx_fp = None
 
     def __enter__(self) -> "BinaryDataWriter":
-        """Return this writer for use as a context manager."""
+        """Return this writer for a context manager."""
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        """Finalize files even when preprocessing exits with an exception."""
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """Close files even when tokenization fails."""
         self.close()
 
-    @property
-    def items_written(self) -> int:
-        """
-        Return the number of tokens written (bytes / dtype.itemsize)
-        """
-        return self.bytes_written // self.dtype.itemsize
 
-
-def dataset_reader(
+def _load_dataset(
     dataset_name: str,
     set_name: str,
     split: str,
-    data_cache_dir: str | None,
-    out_queue: "mp.Queue",
-    chunk_size: int,
+    cache_dir: str,
     local_parquet_dir: str | None = None,
-):
-    """
-    Stream the dataset and push samples to out_queue.
+) -> Any:
+    """Open the requested streaming dataset.
 
     Args:
-        dataset_name: str
-            The dataset identifier on the HuggingFace hub (e.g. ``"HuggingFaceFW/fineweb"``).
-        set_name: str
-            Name of the subset / configuration to use (e.g. ``"sample-10BT"`` for fineweb).
-        split: str
-            Which split to stream (e.g. ``"train"``).
-        data_cache_dir: str | None
-            Directory where the dataset will be cached locally. If ``None`` the
-            default HF cache location is used.
-        out_queue: mp.Queue
-            Queue used to hand over raw records to the main process. A ``None``
-            sentinel is pushed after the stream ends to signal completion.
-        chunk_size: int
-            Number of samples to read from the dataset at a time.
-        local_parquet_dir: str | None
-            If set, read .parquet files from this local directory (recursively)
-            instead of streaming from the HuggingFace hub.
-    """
+        dataset_name: Hugging Face dataset identifier.
+        set_name: Dataset configuration name.
+        split: Dataset split.
+        cache_dir: Local cache directory.
+        local_parquet_dir: Optional local parquet directory.
 
+    Returns:
+        An iterable dataset containing text records.
+    """
     from datasets import load_dataset
 
-    # The Kaggle notebook provides this through a Secret. Passing it explicitly
-    # makes authentication observable and avoids silently falling back to
-    # unauthenticated Hub requests in a spawned process.
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-    try:
-        if local_parquet_dir is not None:
-            # Offline mode: load all local .parquet files under the directory.
-            import glob as glob_module
+    if local_parquet_dir is not None:
+        import glob
 
-            parquet_files = sorted(
-                glob_module.glob(os.path.join(local_parquet_dir, "**", "*.parquet"), recursive=True)
-            )
-            if not parquet_files:
-                raise FileNotFoundError(f"No .parquet files found under {local_parquet_dir}")
-            print(f"[reader] loading {len(parquet_files)} local parquet files", flush=True)
-            dataset_iter = load_dataset(
-                "parquet",
-                data_files=parquet_files,
-                split=split,
-                streaming=True,
-                cache_dir=data_cache_dir,
-                token=hf_token,
-            )
-        else:
-            print(
-                f"[reader] opening {dataset_name}/{set_name}:{split} with streaming=True "
-                f"(HF_TOKEN={'set' if hf_token else 'unset'})",
-                flush=True,
-            )
-            dataset_iter = load_dataset(
-                dataset_name,
-                name=set_name,
-                split=split,
-                streaming=True,
-                cache_dir=data_cache_dir,
-                token=hf_token,
-            )
+        parquet_files = sorted(glob.glob(os.path.join(local_parquet_dir, "**", "*.parquet"), recursive=True))
+        if not parquet_files:
+            raise FileNotFoundError(f"No .parquet files found under {local_parquet_dir}")
+        logger.info("Loading %d local parquet files", len(parquet_files))
+        return load_dataset(
+            "parquet",
+            data_files=parquet_files,
+            split=split,
+            streaming=True,
+            cache_dir=cache_dir,
+            token=hf_token,
+        )
 
-        chunk = []
-        num_samples = 0
-        for sample in dataset_iter:
-            chunk.append(sample)
-            num_samples += 1
-            if len(chunk) == chunk_size:
-                out_queue.put(chunk)
-                chunk = []
-                if num_samples % (chunk_size * 16) == 0:
-                    print(f"[reader] queued {num_samples:,} documents", flush=True)
-        if chunk:
-            out_queue.put(chunk)
-        print(f"[reader] reached end of stream after {num_samples:,} documents", flush=True)
-    except BaseException:
-        # A child-process traceback otherwise disappears and the parent waits
-        # forever for a sentinel. Send a structured error before terminating.
-        out_queue.put(("error", traceback.format_exc()))
-    finally:
-        # Always send a terminal message, including on load/iteration failure.
-        out_queue.put(("done", None))
+    logger.info(
+        "Opening %s/%s:%s with streaming=True (HF_TOKEN=%s)",
+        dataset_name,
+        set_name,
+        split,
+        "set" if hf_token else "unset",
+    )
+    return load_dataset(
+        dataset_name,
+        name=set_name,
+        split=split,
+        streaming=True,
+        cache_dir=cache_dir,
+        token=hf_token,
+    )
 
 
-@lru_cache(maxsize=None)
-def _get_tokenizer(tokenizer_name: str) -> tuple[PreTrainedTokenizer, int]:
-    """
-    Build the tokenizer once per Python process.
+def tokenize_document(
+    tokenizer: PreTrainedTokenizerBase,
+    text: str,
+    max_length: int,
+    bos_token_id: int,
+) -> list[int]:
+    """Tokenize one document with a strict inclusive length limit.
 
     Args:
-        tokenizer_name: str
-            The name of the tokenizer to use.
+        tokenizer: Tokenizer that maps text to vocabulary IDs.
+        text: Document text to tokenize.
+        max_length: Maximum output length, including the BOS token.
+        bos_token_id: Token ID prepended to every document.
 
     Returns:
-        tuple[PreTrainedTokenizer, int]
-            A tuple containing the tokenizer and the end-of-text token ID.
+        Token IDs with shape ``[tokens]`` and length at most ``max_length``.
     """
-    from transformers import AutoTokenizer
-
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, token=hf_token)
-    bos_token_id = tokenizer.bos_token_id
-    return tokenizer, bos_token_id
+    if max_length < 1:
+        raise ValueError(f"max_length must be positive, got {max_length}")
+    tokens = tokenizer.encode(text, max_length=max_length - 1, truncation=True, add_special_tokens=False)
+    return [bos_token_id, *tokens[: max_length - 1]]
 
 
-def tokenize_chunk(chunk: list[dict], tokenizer_name: str, max_length: int) -> list[list[int]]:
-    """
-    Tokenize a chunk of text.
+def main(args: argparse.Namespace) -> None:
+    """Stream, tokenize, and write a bounded binary dataset."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logger.info("Arguments: %s", json.dumps(vars(args), indent=2, default=str))
 
-    Args:
-        chunk: list[dict]
-            A list of dictionaries, each containing a "text" key.
-        tokenizer_name: str
-            The name of the tokenizer to use.
-        max_length: int
-            The maximum length of the tokens to encode. If the text's token length exceeds this, it will be truncated.
-
-    Returns:
-        list[list[int]]
-            A list of lists of token IDs.
-    """
-    tokenizer, bos_token_id = _get_tokenizer(tokenizer_name)  # first call builds, later calls reuse
-    out = []
-    for doc in chunk:
-        tokens = tokenizer.encode(doc["text"], max_length=max_length, truncation=True)
-        if tokens and tokens[0] != bos_token_id:
-            tokens = [bos_token_id] + tokens
-        out.append(tokens)
-    return out
-
-
-def main(args):
-    """
-    Main function to run the data preprocessing pipeline.
-
-    This function:
-    1. Prepares output/cache directories
-    2. Creates a dataset-reader process to stream raw samples
-    3. Creates a writer process to write binary data to disk
-    4. Creates parallel tokenisation workers to tokenize chunks
-    5. Writes tokens to disk until the token budget is exhausted or the dataset stream is exhausted.
-    6. Cleans up resources
-
-    Args:
-        args: argparse.Namespace
-            The parsed command line arguments.
-    """
-    print(args, json.dumps(vars(args), indent=4))
-
-    # Prepare output/cache directories
-    if args.output_dir is None:
-        output_dir = os.path.join(os.path.dirname(__file__), args.dataset.split("/")[1])
-    else:
-        output_dir = args.output_dir
-    if args.max_tokens:
-        output_dir += f"_max_tokens_{str(args.max_tokens)}"
-
+    output_dir = args.output_dir or os.path.join(os.path.dirname(__file__), args.dataset.split("/")[-1])
+    output_dir = f"{output_dir}_max_tokens_{args.max_tokens}"
     os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "args.json"), "w") as f:
-        json.dump(vars(args), f, indent=4)
-    print("Writing to:", output_dir)
+    with open(os.path.join(output_dir, "args.json"), "w", encoding="utf-8") as file:
+        json.dump(vars(args), file, indent=2, default=str)
+    logger.info("Writing to %s", output_dir)
 
-    data_cache_dir = args.data_cache_dir or output_dir
-    os.makedirs(data_cache_dir, exist_ok=True)
-
-    # Dataset-reader process
-    data_queue: mp.Queue = mp.Queue(maxsize=args.prefetch)
-    reader_proc = mp.Process(
-        target=dataset_reader,
-        args=(
-            args.dataset,
-            args.set_name,
-            args.split,
-            data_cache_dir,
-            data_queue,
-            args.chunk_size,
-            args.local_parquet_dir,
-        ),
-        daemon=True,
-    )
-    reader_proc.start()
-
-    # This process writes the binary data to disk.
+    cache_dir = args.data_cache_dir or os.path.join(output_dir, "hf_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
     from transformers import AutoTokenizer
 
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, token=hf_token)
+    if tokenizer.bos_token_id is None:
+        raise ValueError(f"Tokenizer {args.tokenizer!r} has no bos_token_id")
+    dataset_iter = _load_dataset(args.dataset, args.set_name, args.split, cache_dir, args.local_parquet_dir)
     writer = BinaryDataWriter(
-        os.path.join(output_dir, "dataset.bin"), bos_token_id=tokenizer.bos_token_id, vocab_size=tokenizer.vocab_size
+        os.path.join(output_dir, "dataset.bin"),
+        bos_token_id=tokenizer.bos_token_id,
+        vocab_size=len(tokenizer),
     )
-    del tokenizer
 
-    executor = concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers)
-    reached_budget = False
     started_at = time.monotonic()
     last_progress_at = started_at
-    try:
-        with writer:
-            futures: list[concurrent.futures.Future] = []
-            max_pending = max(1, args.num_workers * args.prefetch)
-            stream_finished = False
-            while not stream_finished or futures:
-                while not stream_finished and len(futures) < max_pending:
-                    try:
-                        message = data_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    kind, payload = message
-                    if kind == "error":
-                        raise RuntimeError(f"FineWeb reader failed:\n{payload}")
-                    if kind == "done":
-                        stream_finished = True
-                        break
-                    futures.append(executor.submit(tokenize_chunk, payload, args.tokenizer, args.max_length))
+    documents = 0
+    with writer:
+        for sample in dataset_iter:
+            text = sample.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            tokens = tokenize_document(tokenizer, text, args.max_length, tokenizer.bos_token_id)
+            writer.write(tokens, max_tokens=args.max_tokens)
+            documents += 1
+            if writer.items_written >= args.max_tokens:
+                break
+            now = time.monotonic()
+            if now - last_progress_at >= 10:
+                elapsed = max(now - started_at, 1e-6)
+                logger.info(
+                    "Processed %d documents, wrote %d/%d tokens (%.0f tokens/s)",
+                    documents,
+                    writer.items_written,
+                    int(args.max_tokens),
+                    writer.items_written / elapsed,
+                )
+                last_progress_at = now
 
-                if not futures:
-                    if stream_finished:
-                        break
-                    try:
-                        message = data_queue.get(timeout=30)
-                    except queue.Empty as exc:
-                        if not reader_proc.is_alive():
-                            raise RuntimeError(
-                                f"FineWeb reader exited with code {reader_proc.exitcode} before sending data"
-                            ) from exc
-                        print("[main] still waiting for FineWeb reader (30s)", flush=True)
-                        continue
-                    kind, payload = message
-                    if kind == "error":
-                        raise RuntimeError(f"FineWeb reader failed:\n{payload}")
-                    if kind == "done":
-                        stream_finished = True
-                    else:
-                        futures.append(executor.submit(tokenize_chunk, payload, args.tokenizer, args.max_length))
-                    continue
-
-                for tokens in futures.pop(0).result():
-                    writer.write(tokens, max_tokens=args.max_tokens)
-                    if writer.items_written >= args.max_tokens:
-                        reached_budget = True
-                        break
-                now = time.monotonic()
-                if now - last_progress_at >= 10 or reached_budget:
-                    elapsed = max(now - started_at, 1e-6)
-                    print(
-                        f"[writer] {writer.items_written:,}/{int(args.max_tokens):,} tokens "
-                        f"({writer.items_written / elapsed:,.0f} tokens/s)",
-                        flush=True,
-                    )
-                    last_progress_at = now
-                if reached_budget:
-                    break
-    finally:
-        # Do not wait for queued tokenization jobs after the exact token budget
-        # has been written. The context-manager form calls shutdown(wait=True).
-        executor.shutdown(wait=not reached_budget, cancel_futures=True)
-        if reader_proc.is_alive():
-            reader_proc.terminate()
-        reader_proc.join()
-        data_queue.close()
-        data_queue.join_thread()
+    elapsed = max(time.monotonic() - started_at, 1e-6)
+    logger.info(
+        "Dataset created: %s/dataset.bin (%d tokens from %d documents, %.0f tokens/s)",
+        output_dir,
+        writer.items_written,
+        documents,
+        writer.items_written / elapsed,
+    )
 
 
 if __name__ == "__main__":
