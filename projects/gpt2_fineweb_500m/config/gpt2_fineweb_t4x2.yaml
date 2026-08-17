@@ -1,0 +1,90 @@
+# Kaggle T4 x2 configuration. Keep this file self-contained: the loss target
+# and every constructor argument must agree.
+
+recipe: TrainFinetuneRecipeForNextTokenPrediction
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 4
+  ckpt_every_steps: 10000
+  val_every_steps: 1000000
+  num_epochs: 1
+  max_steps: 30517  # floor(1_000_000_000 / (32 * 1024))
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+performance:
+  float32_matmul_precision: high
+
+model:
+  _target_: nemo_automodel.components.models.gpt2.build_gpt2_model
+  vocab_size: 50304
+  n_positions: 1024
+  n_embd: 768
+  n_layer: 12
+  n_head: 12
+  bias: false
+  use_rope: true
+  norm_type: rmsnorm
+  mlp_type: swiglu
+  dropout: 0.0
+  attn_implementation: sdpa
+  torch_dtype: float16
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: /kaggle/working/fineweb_1B_max_tokens_1B/dataset.bin
+  seq_len: 1024
+  shuffle_files: true
+  align_to_bos: false
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  logit_softcapping: 30.0
+
+clip_grad_norm:
+  max_norm: 1.0
+
+optimizer:
+  _target_: nemo_automodel.components.optim.muon.Muon
+  lr: 0.02
+  momentum: 0.95
+  nesterov: true
+  ns_steps: 5
+  weight_decay: 0.01
+  scalar_lr: 0.0006
+  embedding_lr: 0.0006
+  adamw_betas: [0.9, 0.95]
+  adamw_eps: 1.0e-8
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 200
+  min_lr: 0.002
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+  enable_compile: true
+  mp_policy:
+    param_dtype: torch.float16
+    reduce_dtype: torch.float32
+    output_dtype: torch.float16
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /kaggle/working/checkpoints
+  restore_from: null
+  model_save_format: torch_save
+  save_consolidated: false
+  max_recent_checkpoints: 3

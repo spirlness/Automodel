@@ -33,8 +33,9 @@ def test_kaggle_notebook_uses_the_project_recipe_without_source_injection() -> N
     source = "\n".join("".join(cell["source"]) for cell in generator.build_notebook()["cells"])
 
     assert generator.REPOSITORY_URL in source
-    assert generator.BRANCH in source
+    assert generator.SOURCE_COMMIT in source
     assert generator.RECIPE_PATH in source
+    assert generator.RECIPE_PATH.endswith("gpt2_fineweb_t4x2.yaml")
     assert "nanogpt_data_processor.py" in source
     assert "--max-tokens 1M" in source
     assert "--chunk-size 16" in source
@@ -48,7 +49,8 @@ def test_kaggle_notebook_uses_the_project_recipe_without_source_injection() -> N
     assert "--checkpoint.max_recent_checkpoints=3" in source
     assert 'UserSecretsClient().get_secret("HF_TOKEN")' in source
     assert "RUN_FULL_TRAINING = False" in source
-    assert generator.LOSS_TARGET in source
+    assert "parse_args_and_load_config" in source
+    assert "Config construction OK" in source
     assert "PYTORCH_ALLOC_CONF=expandable_segments:True" in source
     assert generator.MAX_STEPS == 1_000_000_000 // (generator.GLOBAL_BATCH_SIZE * 1024)
     assert generator.GLOBAL_BATCH_SIZE // (generator.LOCAL_BATCH_SIZE * 2) == 4

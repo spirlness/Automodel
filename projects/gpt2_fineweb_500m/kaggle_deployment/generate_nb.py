@@ -18,8 +18,8 @@ import json
 from pathlib import Path
 
 REPOSITORY_URL = "https://github.com/spirlness/Automodel.git"
-BRANCH = "spirlness/feat/gpt2-fineweb-training"
-RECIPE_PATH = "projects/gpt2_fineweb_500m/config/gpt2_fineweb_500m.yaml"
+SOURCE_COMMIT = "84552b22a"
+RECIPE_PATH = "projects/gpt2_fineweb_500m/config/gpt2_fineweb_t4x2.yaml"
 DATA_DIR = "/kaggle/working/fineweb_1B"
 SMOKE_DATA_DIR = "/kaggle/working/fineweb_smoke"
 CHECKPOINT_DIR = "/kaggle/working/checkpoints"
@@ -29,7 +29,6 @@ GLOBAL_BATCH_SIZE = 32
 LOCAL_BATCH_SIZE = 4
 MAX_STEPS = 30517
 CHECKPOINT_INTERVAL = 10000
-LOSS_TARGET = "nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy"
 
 
 def _code_cell(cell_id: str, source: str) -> dict[str, object]:
@@ -68,10 +67,17 @@ if num_gpus != 2 or any("T4" not in name for name in gpu_names):
             ),
             _code_cell(
                 "environment",
-                f"""# Install exactly the branch that contains this recipe.
+                f"""# Install exactly the tested source commit.
 !pip install -q uv
-!git clone --depth 1 --branch {BRANCH} {REPOSITORY_URL} Automodel
+!git clone --filter=blob:none --no-checkout {REPOSITORY_URL} Automodel
 %cd Automodel
+!git fetch --depth 1 origin {SOURCE_COMMIT}
+!git checkout --detach {SOURCE_COMMIT}
+import subprocess
+checked_out_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+if not checked_out_commit.startswith("{SOURCE_COMMIT}"):
+    raise RuntimeError(f"Expected source commit {SOURCE_COMMIT}, got {{checked_out_commit}}")
+print(f"Using source commit {{checked_out_commit}}")
 !uv sync --locked --no-default-groups --inexact
 
 # Prefer the Kaggle Secret, but do not make a public FineWeb run depend on the
@@ -114,9 +120,22 @@ else:
             ),
             _code_cell(
                 "smoke-train",
+                f"""# Construct the exact model and loss from the Kaggle YAML before torchrun.
+from nemo_automodel.components.config._arg_parser import parse_args_and_load_config
+
+cfg = parse_args_and_load_config("{RECIPE_PATH}")
+model = cfg.model.instantiate()
+loss = cfg.loss_fn.instantiate()
+assert model.__class__.__name__ == "GPT2LMHeadModel"
+assert loss.__class__.__name__ == "MaskedCrossEntropy"
+print(f"Config construction OK: model={{model.__class__.__name__}}, loss={{loss.__class__.__name__}}")
+del model, loss, cfg
+""",
+            ),
+            _code_cell(
+                "smoke-train-run",
                 f"""# Exercise two-rank FSDP, FP16, ordinary CE, backward, and optimizer update.
-# T4 supports at most 64 KiB shared memory per block, so use logits-based CE instead
-# of the incompatible fused Triton CE. This runs one full-size global training step.
+# This runs one full-size global training step using the dedicated Kaggle YAML.
 !PYTORCH_ALLOC_CONF=expandable_segments:True uv run automodel {RECIPE_PATH} \
   --nproc-per-node 2 \
   --dataset.file_pattern={SMOKE_DATA_DIR}_max_tokens_{SMOKE_MAX_TOKENS}/dataset.bin \
@@ -127,7 +146,6 @@ else:
   --step_scheduler.val_every_steps=1000000 \
   --step_scheduler.save_checkpoint_every_epoch=false \
   --checkpoint.enabled=false \
-  --loss_fn._target_={LOSS_TARGET} \
   --model.torch_dtype=float16 \
   --distributed.mp_policy.param_dtype=torch.float16 \
   --distributed.mp_policy.output_dtype=torch.float16
@@ -157,7 +175,6 @@ if RUN_FULL_TRAINING:
         "--step_scheduler.save_checkpoint_every_epoch=false "
         "--checkpoint.checkpoint_dir={CHECKPOINT_DIR} "
         "--checkpoint.max_recent_checkpoints=3 "
-        "--loss_fn._target_={LOSS_TARGET} "
         "--model.torch_dtype=float16 "
         "--distributed.mp_policy.param_dtype=torch.float16 "
         "--distributed.mp_policy.output_dtype=torch.float16"
