@@ -22,7 +22,13 @@ from torch.distributed.tensor import DTensor
 class MaskedCrossEntropy(nn.Module):
     """Cross-entropy loss that handles ignored or masked target positions."""
 
-    def __init__(self, fp32_upcast: bool = True, ignore_index: int = -100, reduction: str = "sum"):
+    def __init__(
+        self,
+        fp32_upcast: bool = True,
+        ignore_index: int = -100,
+        reduction: str = "sum",
+        logit_softcapping: float = 0.0,
+    ):
         """
         Masked cross-entropy loss.
 
@@ -31,11 +37,17 @@ class MaskedCrossEntropy(nn.Module):
                 cross entropy. Default: True.
             ignore_index (int): label to ignore in CE calculation. Defaults to -100.
             reduction (str): type of reduction. Defaults to "sum".
+            logit_softcapping (float): positive softcap applied as
+                ``cap * tanh(logits / cap)`` before cross entropy. Zero disables
+                softcapping. Defaults to 0.
         """
         super().__init__()
         self.fp32_upcast = fp32_upcast
         self.ignore_index = ignore_index
         self.reduction = reduction
+        if logit_softcapping < 0:
+            raise ValueError("logit_softcapping must be non-negative")
+        self.logit_softcapping = logit_softcapping
 
     def forward(
         self,
@@ -74,6 +86,9 @@ class MaskedCrossEntropy(nn.Module):
                 del mask
         if self.fp32_upcast:
             logits = logits.float()
+
+        if self.logit_softcapping > 0:
+            logits = self.logit_softcapping * torch.tanh(logits / self.logit_softcapping)
 
         if isinstance(logits, DTensor):
             logits = logits.full_tensor()

@@ -39,6 +39,8 @@ import logging
 import multiprocessing as mp
 import os
 import queue  # for Empty exception handling
+import time
+import traceback
 from functools import lru_cache
 
 import numpy as np
@@ -354,43 +356,64 @@ def dataset_reader(
 
     from datasets import load_dataset
 
-    if local_parquet_dir is not None:
-        # Offline mode: load all local .parquet files under the directory.
-        import glob as glob_module
-
-        parquet_files = sorted(glob_module.glob(os.path.join(local_parquet_dir, "**", "*.parquet"), recursive=True))
-        if not parquet_files:
-            raise FileNotFoundError(f"No .parquet files found under {local_parquet_dir}")
-        print(f"Loading {len(parquet_files)} local parquet files from {local_parquet_dir}", flush=True)
-        dataset_iter = load_dataset(
-            "parquet",
-            data_files=parquet_files,
-            split=split,
-            streaming=True,
-            cache_dir=data_cache_dir,
-        )
-    else:
-        # HF dataset streaming loader
-        dataset_iter = load_dataset(
-            dataset_name,
-            name=set_name,
-            split=split,
-            streaming=True,
-            cache_dir=data_cache_dir,
-        )
-
+    # The Kaggle notebook provides this through a Secret. Passing it explicitly
+    # makes authentication observable and avoids silently falling back to
+    # unauthenticated Hub requests in a spawned process.
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
     try:
+        if local_parquet_dir is not None:
+            # Offline mode: load all local .parquet files under the directory.
+            import glob as glob_module
+
+            parquet_files = sorted(
+                glob_module.glob(os.path.join(local_parquet_dir, "**", "*.parquet"), recursive=True)
+            )
+            if not parquet_files:
+                raise FileNotFoundError(f"No .parquet files found under {local_parquet_dir}")
+            print(f"[reader] loading {len(parquet_files)} local parquet files", flush=True)
+            dataset_iter = load_dataset(
+                "parquet",
+                data_files=parquet_files,
+                split=split,
+                streaming=True,
+                cache_dir=data_cache_dir,
+                token=hf_token,
+            )
+        else:
+            print(
+                f"[reader] opening {dataset_name}/{set_name}:{split} with streaming=True "
+                f"(HF_TOKEN={'set' if hf_token else 'unset'})",
+                flush=True,
+            )
+            dataset_iter = load_dataset(
+                dataset_name,
+                name=set_name,
+                split=split,
+                streaming=True,
+                cache_dir=data_cache_dir,
+                token=hf_token,
+            )
+
         chunk = []
+        num_samples = 0
         for sample in dataset_iter:
             chunk.append(sample)
+            num_samples += 1
             if len(chunk) == chunk_size:
                 out_queue.put(chunk)
                 chunk = []
+                if num_samples % (chunk_size * 16) == 0:
+                    print(f"[reader] queued {num_samples:,} documents", flush=True)
         if chunk:
             out_queue.put(chunk)
+        print(f"[reader] reached end of stream after {num_samples:,} documents", flush=True)
+    except BaseException:
+        # A child-process traceback otherwise disappears and the parent waits
+        # forever for a sentinel. Send a structured error before terminating.
+        out_queue.put(("error", traceback.format_exc()))
     finally:
-        # Always push sentinel so consumer can terminate.
-        out_queue.put(None)
+        # Always send a terminal message, including on load/iteration failure.
+        out_queue.put(("done", None))
 
 
 @lru_cache(maxsize=None)
@@ -408,7 +431,8 @@ def _get_tokenizer(tokenizer_name: str) -> tuple[PreTrainedTokenizer, int]:
     """
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, token=hf_token)
     bos_token_id = tokenizer.bos_token_id
     return tokenizer, bos_token_id
 
@@ -493,46 +517,77 @@ def main(args):
     # This process writes the binary data to disk.
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, token=hf_token)
     writer = BinaryDataWriter(
         os.path.join(output_dir, "dataset.bin"), bos_token_id=tokenizer.bos_token_id, vocab_size=tokenizer.vocab_size
     )
     del tokenizer
 
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers)
+    reached_budget = False
+    started_at = time.monotonic()
+    last_progress_at = started_at
     try:
-        with writer, concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+        with writer:
             futures: list[concurrent.futures.Future] = []
             max_pending = max(1, args.num_workers * args.prefetch)
             stream_finished = False
             while not stream_finished or futures:
                 while not stream_finished and len(futures) < max_pending:
                     try:
-                        chunk = data_queue.get_nowait()
+                        message = data_queue.get_nowait()
                     except queue.Empty:
                         break
-                    if chunk is None:
+                    kind, payload = message
+                    if kind == "error":
+                        raise RuntimeError(f"FineWeb reader failed:\n{payload}")
+                    if kind == "done":
                         stream_finished = True
                         break
-                    futures.append(executor.submit(tokenize_chunk, chunk, args.tokenizer, args.max_length))
+                    futures.append(executor.submit(tokenize_chunk, payload, args.tokenizer, args.max_length))
 
                 if not futures:
-                    if not stream_finished:
-                        chunk = data_queue.get()
-                        if chunk is None:
-                            stream_finished = True
-                        else:
-                            futures.append(executor.submit(tokenize_chunk, chunk, args.tokenizer, args.max_length))
+                    if stream_finished:
+                        break
+                    try:
+                        message = data_queue.get(timeout=30)
+                    except queue.Empty as exc:
+                        if not reader_proc.is_alive():
+                            raise RuntimeError(
+                                f"FineWeb reader exited with code {reader_proc.exitcode} before sending data"
+                            ) from exc
+                        print("[main] still waiting for FineWeb reader (30s)", flush=True)
+                        continue
+                    kind, payload = message
+                    if kind == "error":
+                        raise RuntimeError(f"FineWeb reader failed:\n{payload}")
+                    if kind == "done":
+                        stream_finished = True
+                    else:
+                        futures.append(executor.submit(tokenize_chunk, payload, args.tokenizer, args.max_length))
                     continue
 
                 for tokens in futures.pop(0).result():
                     writer.write(tokens, max_tokens=args.max_tokens)
-                    if writer.items_written == args.max_tokens:
+                    if writer.items_written >= args.max_tokens:
+                        reached_budget = True
                         break
-                if writer.items_written == args.max_tokens:
-                    for future in futures:
-                        future.cancel()
+                now = time.monotonic()
+                if now - last_progress_at >= 10 or reached_budget:
+                    elapsed = max(now - started_at, 1e-6)
+                    print(
+                        f"[writer] {writer.items_written:,}/{int(args.max_tokens):,} tokens "
+                        f"({writer.items_written / elapsed:,.0f} tokens/s)",
+                        flush=True,
+                    )
+                    last_progress_at = now
+                if reached_budget:
                     break
     finally:
+        # Do not wait for queued tokenization jobs after the exact token budget
+        # has been written. The context-manager form calls shutdown(wait=True).
+        executor.shutdown(wait=not reached_budget, cancel_futures=True)
         if reader_proc.is_alive():
             reader_proc.terminate()
         reader_proc.join()

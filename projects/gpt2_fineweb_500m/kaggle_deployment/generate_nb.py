@@ -72,14 +72,31 @@ if num_gpus != 2 or any("T4" not in name for name in gpu_names):
 !pip install -q uv
 !git clone --depth 1 --branch {BRANCH} {REPOSITORY_URL} Automodel
 %cd Automodel
-!uv sync --locked --group dev --extra fa --inexact
+!uv sync --locked --no-default-groups --inexact
 
-# Store the token only in Kaggle Secrets under the name HF_TOKEN. Never print it.
+# Prefer the Kaggle Secret, but do not make a public FineWeb run depend on the
+# Kaggle secret service being available. Never print the token.
 from kaggle_secrets import UserSecretsClient
 import os
 
-os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
-print("Loaded HF_TOKEN from Kaggle Secrets.")
+hf_token = os.environ.get("HF_TOKEN")
+try:
+    secret_token = UserSecretsClient().get_secret("HF_TOKEN")
+except Exception as exc:
+    secret_token = None
+    print(f"HF_TOKEN Kaggle Secret is unavailable ({{type(exc).__name__}}); continuing without it.")
+if secret_token:
+    hf_token = secret_token
+if hf_token:
+    os.environ["HF_TOKEN"] = hf_token
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "60"
+os.environ["HF_HUB_ETAG_TIMEOUT"] = "60"
+if hf_token:
+    from huggingface_hub import whoami
+    whoami(token=hf_token)
+    print("Loaded and validated HF_TOKEN.")
+else:
+    print("No HF_TOKEN available; FineWeb is public, continuing unauthenticated.")
 """,
             ),
             _code_cell(

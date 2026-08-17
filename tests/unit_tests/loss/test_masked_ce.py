@@ -66,6 +66,19 @@ def test_masked_cross_entropy_with_mask():
     )
 
 
+def test_masked_cross_entropy_supports_logit_softcapping():
+    """The fallback loss accepts the same softcap option as the fused loss."""
+    logits = torch.tensor([[2.0, -1.0, 0.5]])
+    targets = torch.tensor([0])
+    cap = 2.0
+    capped_logits = cap * torch.tanh(logits / cap)
+
+    actual = MaskedCrossEntropy(logit_softcapping=cap)(logits, targets)
+    expected = F.cross_entropy(capped_logits, targets, reduction="sum")
+
+    assert torch.allclose(actual, expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_masked_cross_entropy_gpu():
     """

@@ -15,7 +15,10 @@
 """Regression tests for the FineWeb binary-data preprocessing tool."""
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
+from queue import Queue
 
 import numpy as np
 
@@ -62,3 +65,35 @@ def test_tokenize_chunk_enables_truncation() -> None:
     processor.tokenize_chunk([{"text": "example"}], "test", 2)
 
     assert tokenizer.kwargs == {"max_length": 2, "truncation": True}
+
+
+def test_dataset_reader_reports_loader_errors_instead_of_hanging() -> None:
+    """A Hub failure must reach the parent process as an error message and done marker."""
+    processor = _load_processor_module()
+
+    def failing_load_dataset(*_: object, **__: object) -> object:
+        raise RuntimeError("simulated Hub timeout")
+
+    fake_datasets = types.SimpleNamespace(load_dataset=failing_load_dataset)
+    original_datasets = sys.modules.get("datasets")
+    sys.modules["datasets"] = fake_datasets
+    messages: Queue = Queue()
+    try:
+        processor.dataset_reader(
+            "HuggingFaceFW/fineweb",
+            "sample-10BT",
+            "train",
+            "/tmp/cache",
+            messages,
+            2,
+        )
+    finally:
+        if original_datasets is None:
+            sys.modules.pop("datasets", None)
+        else:
+            sys.modules["datasets"] = original_datasets
+
+    kind, error = messages.get_nowait()
+    assert kind == "error"
+    assert "simulated Hub timeout" in error
+    assert messages.get_nowait() == ("done", None)
