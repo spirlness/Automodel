@@ -48,11 +48,20 @@ _DEVICE_FLOPS: Dict[str, float] = {
     "L40S": 362.05e12,
     "L40": 181.05e12,
     "A40": 149.7e12,
+    "A10G": 125e12,
+    "A10": 125e12,
     "L20": 119.5e12,
     "H20": 148e12,
+    "V100": 125e12,
+    "T4": 65e12,
     "910B": 354e12,
     "Ascend910": 354e12,
+    "RTX 4090": 165.2e12,
+    "RTX 3090": 71e12,
+    "RTX 3080": 59.5e12,
     "RTX 3070 Ti": 21.75e12,
+    "RTX 3070": 20.3e12,
+    "RTX 3060": 25.0e12,
 }
 
 _UNIT_TO_SCALE = {
@@ -114,12 +123,12 @@ class AutoMFU:
     Model FLOPs Utilization (MFU) during training.
     """
 
-    def __init__(self, config: "PretrainedConfig", device: str = "h100"):
+    def __init__(self, config: "PretrainedConfig", device: Optional[str] = None):
         """Initialize AutoMFU with a model config.
 
         Args:
             config: HuggingFace PretrainedConfig object
-            device: Device name (e.g. ``"h100"``)
+            device: Device name (e.g. ``"h100"``, or ``None`` to auto-detect)
         """
         self.config = config
         self.flops_formula = get_flops_formula_for_hf_config(config)
@@ -134,7 +143,7 @@ class AutoMFU:
     def from_config(
         cls,
         config_or_path_or_model: Union["PretrainedConfig", str, PathLike[str], object],
-        device: str = "h100",
+        device: Optional[str] = None,
         **kwargs,
     ) -> "AutoMFU":
         """Create AutoMFU from a config object, model object, or model path/ID.
@@ -142,7 +151,7 @@ class AutoMFU:
         Args:
             config_or_path_or_model: Either a PretrainedConfig object, a model object
                 (the .config attribute will be extracted), or a model ID/local path.
-            device: Device name (e.g. ``"h100"``)
+            device: Device name (e.g. ``"h100"``, or ``None`` to auto-detect)
             **kwargs: Additional arguments passed to AutoConfig.from_pretrained
                 when loading from model ID/path.
 
@@ -163,7 +172,7 @@ class AutoMFU:
     def from_pretrained(
         cls,
         model_id_or_local_path_or_model: Union[str, PathLike[str], object],
-        device: str = "h100",
+        device: Optional[str] = None,
         **kwargs,
     ) -> "AutoMFU":
         """Create AutoMFU from model ID, local path, or a model object.
@@ -171,7 +180,7 @@ class AutoMFU:
         Args:
             model_id_or_local_path_or_model: Model ID (e.g., "meta-llama/llama-3-70b"),
                 local path, or model object (the .config attribute will be extracted)
-            device: Device name (e.g. ``"h100"``)
+            device: Device name (e.g. ``"h100"``, or ``None`` to auto-detect)
             **kwargs: Additional arguments passed to AutoConfig.from_pretrained
 
         Returns:

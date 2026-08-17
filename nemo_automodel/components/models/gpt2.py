@@ -31,6 +31,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import GPT2Config
 
 __all__ = ["build_gpt2_model", "GPT2LMHeadModel", "RMSNorm", "SwiGLU"]
 
@@ -235,6 +236,14 @@ class GPT2LMHeadModel(nn.Module):
         self.vocab_size = vocab_size
         self.n_positions = n_positions
         self.use_rope = use_rope
+        self.config = GPT2Config(
+            vocab_size=vocab_size,
+            n_positions=n_positions,
+            n_embd=n_embd,
+            n_layer=n_layer,
+            n_head=n_head,
+            intermediate_size=2048 if mlp_type == "swiglu" else 4 * n_embd,
+        )
         self.wte = nn.Embedding(vocab_size, n_embd)
 
         # If RoPE is disabled, fall back to learned absolute positional embeddings

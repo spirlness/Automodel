@@ -68,7 +68,7 @@ optimizer:
 lr_scheduler:
   lr_decay_style: cosine
   lr_warmup_steps: 200
-  min_lr: 0.002
+  min_lr: 0.00006
 
 # Baseline data-parallel training. No FSDP2 or torch.compile is required.
 distributed:
