@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 REPOSITORY_URL = "https://github.com/spirlness/Automodel.git"
-SOURCE_COMMIT = "84552b22a"
+SOURCE_COMMIT = "82b6ab364"
 RECIPE_PATH = "projects/gpt2_fineweb_500m/config/gpt2_fineweb_t4x2.yaml"
 RECIPE_ABS_PATH = f"/kaggle/working/Automodel/{RECIPE_PATH}"
 DATA_DIR = "/kaggle/working/fineweb_1B"
