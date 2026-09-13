@@ -84,7 +84,7 @@ dependencies = [
     "pybind11",
     "pyyaml",
     "tiktoken",
-    "torch>=2.6.0",
+    "torch==2.14.0",
     "torchdata",
     "transformers==5.15.1",
     "torchao",
@@ -99,7 +99,7 @@ diffusion = [
     "diffusers>=0.39.0",
     "ftfy",
     "imageio",
-    "torchvision",
+    "torchvision==0.29.0",
 ]
 diffusion_kernels = [
     "nemo-automodel[diffusion]",
@@ -231,7 +231,7 @@ automodel = "nemo_automodel.cli.app:main"
 am = "nemo_automodel.cli.app:main"
 
 [dependency-groups]
-build = ["setuptools", "torch<=2.10.0", "packaging", "psutil"]
+build = ["setuptools", "torch==2.14.0", "packaging", "psutil"]
 docs = [
     "sphinx",
     "sphinx-autobuild",    # For live doc serving while editing docs
@@ -331,6 +331,9 @@ deep_ep = { git = "https://github.com/deepseek-ai/DeepEP.git", rev = "4214430375
 cut-cross-entropy = { git = "https://github.com/apple/ml-cross-entropy.git", rev = "87a86aba72cfd2f0d8abecaf81c13c4528ea07d8" }
 magi_attention = { git = "https://github.com/SandAI-org/MagiAttention.git", rev = "d7ea8afd44c790b65fab68a04a6a0fdd5adbf182" }
 liger-kernel = { git = "https://github.com/linkedin/Liger-Kernel.git", rev = "1f1a4b8d6a6c3c1ddb3573a46480c41cef25bde6" }
+# Patched in-repo: upstream 2.3.0 hard-codes -std=c++17, which the PyTorch 2.14
+# headers reject. See third_party/README.md for the patch and removal condition.
+mamba-ssm = { path = "third_party/mamba-ssm" }
 onnxruntime-gpu = { index = "onnxruntime-cuda-13" }
 torch = [
   { index = "pytorch-cpu", marker = "sys_platform != 'linux' and sys_platform != 'darwin'" },
@@ -436,6 +439,7 @@ line-length = 120
 target-version = "py310"
 exclude = [
    "tests/",
+   "third_party/",
 ]
 
 [tool.ruff.format]

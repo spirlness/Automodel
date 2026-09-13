@@ -19,23 +19,29 @@ repos:
     - id: end-of-file-fixer
       # only include python files
       files: \.py$
+      # vendored upstream sources are kept byte-identical to upstream
+      exclude: ^third_party/
     - id: trailing-whitespace
       # only include python files
       files: \.py$
+      # vendored upstream sources are kept byte-identical to upstream
+      exclude: ^third_party/
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: "aab412d509121cb5f7533134b7e67f9fab59c682"  # frozen: v0.16.4
     hooks:
     - id: ruff-check
       args: ["--fix"]
+      exclude: ^third_party/
     - id: ruff-format
+      exclude: ^third_party/
 
   - repo: https://github.com/PyCQA/bandit
     rev: "92ae8b82fb422a639f0ed8d99e96cea769594e08"  # frozen: 1.9.4
     hooks:
     - id: bandit
       args: ["-t", "B614"]
-      exclude: "^tests/"
+      exclude: "^(tests|third_party)/"
 
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: "b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6"  # frozen: 0.12.5
