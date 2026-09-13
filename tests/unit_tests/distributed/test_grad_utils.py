@@ -67,7 +67,6 @@ def spawn_threads_and_init_comms(func=None, *, timeout=5, world_size=1):
         return partial(spawn_threads_and_init_comms, timeout=timeout, world_size=world_size)
 
     def _run_test_method_with_multi_threads(world_size: int, callback):
-
         world = _install_threaded_pg()
         global_store = c10d.HashStore()
 
@@ -172,6 +171,16 @@ def test_clip_grad_by_total_norm_scaling(max_grad_norm: float, total_norm: float
 
     assert torch.allclose(p1.grad, g1_before * scaling_expected)
     assert torch.allclose(p2.grad, g2_before * scaling_expected)
+
+
+def test_clip_grad_by_total_norm_scales_bfloat16_gradient_in_place():
+    """BF16 gradients must be clipped rather than only an FP32 temporary copy."""
+    parameter = torch.tensor([3.0, 4.0], dtype=torch.bfloat16, requires_grad=True)
+    parameter.grad = parameter.detach().clone()
+
+    grad_utils.clip_grad_by_total_norm_(parameter, max_grad_norm=1.0, total_norm=5.0)
+
+    assert torch.allclose(parameter.grad, torch.tensor([0.6015625, 0.80078125], dtype=torch.bfloat16))
 
 
 def test_clip_grad_by_total_norm_handles_none_gradients():

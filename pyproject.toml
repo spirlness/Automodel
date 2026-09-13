@@ -405,6 +405,7 @@ requires-dist = ["torch", "packaging", "ninja", "setuptools"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = ["gpu: requires a CUDA-capable GPU"]
 
 [tool.coverage.paths]
 source = ["nemo_automodel", "/opt/Automodel/nemo_automodel", "/home/runner/work/Automodel/Automodel/nemo_automodel"]

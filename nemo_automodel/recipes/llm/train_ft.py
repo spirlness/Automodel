@@ -120,6 +120,27 @@ logger = logging.getLogger(__name__)
 # ---------------------------
 #  Stateless helper functions
 # ---------------------------
+def _configure_float32_matmul_precision(precision: str | None) -> None:
+    """Configure CUDA float32 matrix-multiplication precision when requested.
+
+    Args:
+        precision: PyTorch float32 matmul precision mode: ``"highest"``,
+            ``"high"``, or ``"medium"``. ``None`` leaves the process default
+            unchanged.
+
+    Raises:
+        ValueError: If ``precision`` is not a supported PyTorch mode.
+    """
+    if precision is None:
+        return
+    if precision not in {"highest", "high", "medium"}:
+        raise ValueError(
+            f"performance.float32_matmul_precision must be one of 'highest', 'high', or 'medium', got {precision!r}."
+        )
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision(precision)
+
+
 def _get_model_name(cfg_model):
     if cfg_model.get("pretrained_model_name_or_path", None) is not None:
         return cfg_model.pretrained_model_name_or_path
@@ -489,6 +510,7 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             backend=self.cfg.get("dist_env", {}).get("backend", "nccl"),
             timeout_minutes=self.cfg.get("dist_env", {}).get("timeout_minutes", 1),
         )
+        _configure_float32_matmul_precision(self.cfg.get("performance.float32_matmul_precision", None))
         # setups logging and adds the rankfilter to logging
         setup_logging()
 

@@ -44,6 +44,7 @@ from nemo_automodel.recipes._typed_config import RecipeConfig, _as_dict, _callab
 from nemo_automodel.recipes.llm.train_ft import (
     TrainFinetuneRecipeForNextTokenPrediction,
     _build_pp_collate_wrapper,
+    _configure_float32_matmul_precision,
     _should_pack_validation,
     build_model,
     compute_trust_remote_code_from_model,
@@ -58,6 +59,23 @@ def test_recipe_config_resolves_mfu_settings():
 
 def test_recipe_config_defaults_mfu_settings():
     assert RecipeConfig(ConfigNode({})).mfu == MFUConfig()
+
+
+def test_configure_float32_matmul_precision(monkeypatch) -> None:
+    """The recipe applies a configured CUDA float32 matmul precision mode."""
+    configured_modes = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", configured_modes.append)
+
+    _configure_float32_matmul_precision("high")
+
+    assert configured_modes == ["high"]
+
+
+def test_configure_float32_matmul_precision_rejects_invalid_mode() -> None:
+    """The recipe rejects unsupported float32 matmul precision modes."""
+    with pytest.raises(ValueError, match="performance.float32_matmul_precision"):
+        _configure_float32_matmul_precision("invalid")
 
 
 def _build_loader(

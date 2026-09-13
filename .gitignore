@@ -126,6 +126,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Codex CLI local config
+.codex/
+
 # VSCode project settins
 .vscode/
 

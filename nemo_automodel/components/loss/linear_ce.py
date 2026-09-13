@@ -242,6 +242,12 @@ class FusedLinearCrossEntropy(nn.Module):
             lm_weight,
             grad_reduce_group=grad_reduce_group,
         )
+        if lm_weight.dtype != hidden_states.dtype:
+            # nn.Linear participates in CUDA autocast, but the fused Triton
+            # kernel receives its weight directly and requires matching fp16 or
+            # bf16 inputs. The cast remains in the autograd graph so gradients
+            # are accumulated on the original parameter dtype.
+            lm_weight = lm_weight.to(hidden_states.dtype)
 
         # First compute loss with sum reduction to handle normalization ourselves
         if self.logit_softcapping == 0:

@@ -468,6 +468,122 @@ class DionConfig(_DionConfigBase):
         return Dion(param_groups, **ctor_kwargs)
 
 
+@dataclass
+class LocalMuonConfig(OptimizerConfig):
+    """Build the repository-local Muon optimizer with explicit parameter groups."""
+
+    lr: float = 0.02
+    momentum: float = 0.95
+    nesterov: bool = True
+    ns_steps: int = 5
+    weight_decay: float = 0.01
+    scalar_lr: float = 6e-4
+    embedding_lr: float = 6e-4
+    lm_head_lr: float | None = None
+    adamw_betas: tuple[float, float] = (0.9, 0.95)
+    adamw_eps: float = 1e-8
+
+    def build(
+        self,
+        model: torch.nn.Module,
+        *,
+        device_mesh: DeviceMesh | None = None,
+        is_peft: bool = False,
+    ) -> list[torch.optim.Optimizer]:
+        """Build one grouped local-Muon optimizer per model part.
+
+        Args:
+            model: Model whose trainable parameters are partitioned by module type and parameter role.
+            device_mesh: Unused; accepted to satisfy the shared optimizer-config contract.
+            is_peft: Unused; accepted to satisfy the shared optimizer-config contract.
+
+        Returns:
+            One optimizer per model part, with Muon and AdamW parameter groups.
+        """
+        if self.param_group_overrides:
+            logger.warning("param_group_overrides is ignored by LocalMuonConfig's role-based parameter grouping")
+        from nemo_automodel.components.optim.muon import Muon
+
+        optimizers: list[torch.optim.Optimizer] = []
+        for part in getattr(model, "parts", [model]):
+            module_by_name = dict(part.named_modules())
+            matrix_params: list[torch.nn.Parameter] = []
+            scalar_params: list[torch.nn.Parameter] = []
+            embedding_params: list[torch.nn.Parameter] = []
+            lm_head_params: list[torch.nn.Parameter] = []
+            for name, parameter in part.named_parameters():
+                if not parameter.requires_grad:
+                    continue
+                module = module_by_name.get(name.rsplit(".", 1)[0])
+                if isinstance(module, torch.nn.Embedding):
+                    embedding_params.append(parameter)
+                elif "lm_head" in name:
+                    lm_head_params.append(parameter)
+                elif parameter.ndim == 2:
+                    matrix_params.append(parameter)
+                else:
+                    scalar_params.append(parameter)
+            if not matrix_params and not scalar_params and not embedding_params and not lm_head_params:
+                raise ValueError("LocalMuonConfig received no trainable parameters")
+
+            groups: list[dict[str, Any]] = []
+            if matrix_params:
+                groups.append({"params": matrix_params, "algorithm": "muon"})
+            if scalar_params:
+                groups.append(
+                    {
+                        "params": scalar_params,
+                        "algorithm": "adamw",
+                        "lr": self.scalar_lr,
+                        "lr_mult": self.scalar_lr / self.lr,
+                        "weight_decay": self.weight_decay,
+                        "wd_mult": 1.0,
+                        "betas": self.adamw_betas,
+                        "eps": self.adamw_eps,
+                    }
+                )
+            if embedding_params:
+                groups.append(
+                    {
+                        "params": embedding_params,
+                        "algorithm": "adamw",
+                        "lr": self.embedding_lr,
+                        "lr_mult": self.embedding_lr / self.lr,
+                        "weight_decay": 0.0,
+                        "wd_mult": 0.0,
+                        "betas": self.adamw_betas,
+                        "eps": self.adamw_eps,
+                    }
+                )
+            if lm_head_params:
+                head_lr = self.lm_head_lr if self.lm_head_lr is not None else self.embedding_lr
+                groups.append(
+                    {
+                        "params": lm_head_params,
+                        "algorithm": "adamw",
+                        "lr": head_lr,
+                        "lr_mult": head_lr / self.lr,
+                        "weight_decay": 0.0,
+                        "wd_mult": 0.0,
+                        "betas": self.adamw_betas,
+                        "eps": self.adamw_eps,
+                    }
+                )
+            optimizers.append(
+                Muon(
+                    groups,
+                    lr=self.lr,
+                    momentum=self.momentum,
+                    nesterov=self.nesterov,
+                    ns_steps=self.ns_steps,
+                    weight_decay=self.weight_decay,
+                    betas=self.adamw_betas,
+                    eps=self.adamw_eps,
+                )
+            )
+        return optimizers
+
+
 # ---------------------------------------------------------------------------
 # Escape hatch: build from an arbitrary factory callable
 # ---------------------------------------------------------------------------
@@ -889,6 +1005,11 @@ def build_optimizer_config(
     kwargs = dict(kwargs or {})
     if isinstance(target, type) and issubclass(target, OptimizerConfig):
         return target(**kwargs)
+    if (
+        getattr(target, "__module__", "") == "nemo_automodel.components.optim.muon"
+        and getattr(target, "__name__", "") == "Muon"
+    ):
+        return LocalMuonConfig(**kwargs)
     # Dion-family optimizers need parameter grouping; route a resolved dion class
     # (e.g. YAML ``_target_: dion.Muon``) to its typed config rather than the flat-params
     # factory escape hatch, which would lose grouping and leak grouping-only kwargs.
@@ -970,6 +1091,7 @@ __all__ = [
     "FlashAdamWConfig",
     "FusedAdamConfig",
     "LRSchedulerConfig",
+    "LocalMuonConfig",
     "MuonConfig",
     "NorMuonConfig",
     "OptimizerConfig",
